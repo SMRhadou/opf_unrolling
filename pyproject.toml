@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "opf"
+version = "0.1.0"
+description = ""
+authors = ["Damian Owerko <owerko@seas.upenn.edu>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10,<3.12"
+pandas = ">1.5.2"
+pytorch-lightning = "^2.4.0"
+numpy = "^1.23.5"
+jupyter = "^1.0.0"
+pytest = "^7.2.0"
+seaborn = "^0.13.2"
+pandoc = "^2.3"
+torch = "2.4.*"
+matpowercaseframes = "^1.0.4"
+torchcps = {git = "https://github.com/Damowerko/torchcps"}
+optuna = "^4.0.0"
+psycopg2-binary = "^2.9.7"
+plotly = "^5.16.1"
+h5py = "^3.12.1"
+optuna-integration = {extras = ["pytorch-lightning"], version = "^4.0.0"}
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "supplemental"
+
+[[tool.poetry.source]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.4.0+cu124.html"
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
