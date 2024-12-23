@@ -684,7 +684,7 @@ class critic_heteroSage(HeteroSage):
             )
         
 
-    def forward(self, x_dict, multipliers, edge_index_dict, raw=True):
+    def forward(self, x_dict, multipliers, edge_index_dict, t=None, raw=True):
         # zero pad x_dict to x_channels size
         x_dict = {
             node_type: torch.cat(
@@ -786,7 +786,10 @@ class actor_heteroSage(HeteroSage):
         #     help="Number of hidden features on each layer.",
         # )
         group.add_argument(
-            "--n_layers_actor", type=int, default=6, help="Number of GNN layers."
+            "--n_layers_actor", type=int, default=10, help="Number of GNN layers."
+        )
+        group.add_argument(
+            "--n_sub_layer_actor", type=int, default=1, help="Number of sub layers in each actor layer."
         )
         # group.add_argument(
         #     "--mlp_read_layers",
@@ -819,6 +822,7 @@ class actor_heteroSage(HeteroSage):
         lambda_channels: int,
         y_channels: int | nn.Module,
         n_layers_actor: int = 2,
+        n_sub_layer_actor: int = 2,
         n_channels: int = 32,
         mlp_read_layers: int = 1,
         mlp_per_gnn_layers: int = 0,
@@ -846,44 +850,48 @@ class actor_heteroSage(HeteroSage):
         self.lambda_channels = lambda_channels
         self.y_channels = y_channels
         self.skip_connection = skip_connection
+        self.sub_layers_actor = n_sub_layer_actor
         self.residual_blocks = nn.ModuleList()
         for i in range(n_layers_actor):
-            conv = gnn.HeteroConv(
-                {
-                    edge_type: gnn.SAGEConv(
-                        in_channels=n_channels,
-                        out_channels=n_channels,
-                        aggr=aggr,
-                        normalize=True,
-                    )
-                    for edge_type in edge_types
-                }
-            )
-            mlp = HeteroDictMLP(
-                in_channels=n_channels,
-                hidden_channels=mlp_hidden_channels,
-                out_channels=n_channels,
-                num_layers=mlp_per_gnn_layers,
-                node_types=node_types,
-                dropout=dropout,
-                plain_last=True,
-            )
-            conv_norm = HeteroDictMap(
-                {node_type: gnn.BatchNorm(n_channels) for node_type in node_types}
-            )
-            mlp_norm = HeteroDictMap(
-                {node_type: gnn.BatchNorm(n_channels) for node_type in node_types}
-            )
-            self.residual_blocks.append(
-                HeteroDictResidualBlock(
-                    conv=conv,
-                    conv_norm=conv_norm,
-                    mlp=mlp,
-                    mlp_norm=mlp_norm,
-                    act=nn.LeakyReLU(),
-                    dropout=dropout,
+            sub_layers = nn.ModuleList()
+            for j in range(self.sub_layers_actor):
+                conv = gnn.HeteroConv(
+                    {
+                        edge_type: gnn.SAGEConv(
+                            in_channels=n_channels,
+                            out_channels=n_channels,
+                            aggr=aggr,
+                            normalize=True,
+                        )
+                        for edge_type in edge_types
+                    }
                 )
-            )
+                mlp = HeteroDictMLP(
+                    in_channels=n_channels,
+                    hidden_channels=mlp_hidden_channels,
+                    out_channels=n_channels,
+                    num_layers=mlp_per_gnn_layers,
+                    node_types=node_types,
+                    dropout=dropout,
+                    plain_last=True,
+                )
+                conv_norm = HeteroDictMap(
+                    {node_type: gnn.BatchNorm(n_channels) for node_type in node_types}
+                )
+                mlp_norm = HeteroDictMap(
+                    {node_type: gnn.BatchNorm(n_channels) for node_type in node_types}
+                )
+                sub_layers.append(
+                    HeteroDictResidualBlock(
+                        conv=conv,
+                        conv_norm=conv_norm,
+                        mlp=mlp,
+                        mlp_norm=mlp_norm,
+                        act=nn.LeakyReLU(),
+                        dropout=dropout,
+                    )
+                )
+            self.residual_blocks.append(sub_layers)
     
     @staticmethod
     def multipliers_raw(multipliers, location, batch_size):
@@ -904,8 +912,9 @@ class actor_heteroSage(HeteroSage):
             # predict primal variable
             x_dict, _, location = critic_model(prob_param, multipliers, edge_index_dict, raw=True if i == 0 else False)
             # predict multiplier
-            x = self.readin(x_dict)
-            multipliers = actor_block(x, edge_index_dict)
+            multipliers = self.readin(x_dict)
+            for sub_layer in actor_block:
+                multipliers = sub_layer(multipliers, edge_index_dict)
             multipliers = self.readout(multipliers)
             if self.skip_connection:
                 multipliers = {

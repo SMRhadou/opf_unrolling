@@ -295,14 +295,14 @@ class OPFDual(pl.LightningModule):
         loss_supervised = loss_voltage + loss_gen + loss_power
         self.log_dict(
             {
-                "train/supervised_voltage": loss_voltage,
-                "train/supervised_gen": loss_gen,
-                "train/supervised_power": loss_power,
+                "pd/train/supervised_voltage": loss_voltage,
+                "pd/train/supervised_gen": loss_gen,
+                "pd/train/supervised_power": loss_power,
             },
             batch_size=batch.data.num_graphs,
         )
         self.log(
-            "train/supervised_loss",
+            "pd/train/supervised_loss",
             loss_supervised,
             batch_size=batch.data.num_graphs,
         )
@@ -319,7 +319,7 @@ class OPFDual(pl.LightningModule):
         St_loss = (variables.St - St_pred).abs().pow(2).mean()
         powerflow_loss = Sf_loss + St_loss
         self.log(
-            "train/powerflow_loss",
+            "pd/train/powerflow_loss",
             powerflow_loss,
             batch_size=batch.data.num_graphs,
         )
@@ -385,32 +385,50 @@ class OPFDual(pl.LightningModule):
             self.project_multipliers_common()           # Ensure the inequality constraints are always positive
 
         self.log(
-            "train/loss",
+            "pd/train/loss",
             loss,
             prog_bar=True,
             batch_size=batch.data.num_graphs,
             sync_dist=True,
         )
         self.log_dict(
-            self.metrics(cost, constraints, "train", self.detailed_metrics, train=True),
+            self.metrics(cost, constraints, "pd/train", self.detailed_metrics, train=True),
             batch_size=batch.data.num_graphs,
             sync_dist=True,
         )
+
+        opf_constraints = self.constraints(variables, batch.powerflow_parameters, multipliers)
+        self.log(f"pd/train/loss/supervised", supervised_loss,
+            batch_size=batch.data.num_graphs, sync_dist=True)
+        for name, value in multipliers.items():
+            self.log(f"pd/train/multipliers/max/{name}", value.max(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            self.log(f"pd/train/multipliers/mean/{name}", value.mean(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            # show opf constraints
+        for name, value in opf_constraints.items():
+            self.log(f"pd/train/constraints/max/{name}", value['violation_max'][0].max(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            self.log(f"pd/train/constraints/mean/{name}", value['violation_mean'].mean(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+
+
+
 
     def validation_step(self, batch: PowerflowBatch, *args):
         batch_size = batch.data.num_graphs
         _, constraints, cost = self._step_helper(
             self(batch)[0], batch.powerflow_parameters
         )
-        metrics = self.metrics(cost, constraints, "val", self.detailed_metrics)
+        metrics = self.metrics(cost, constraints, "pd/val", self.detailed_metrics)
         self.log_dict(metrics, batch_size=batch_size, sync_dist=True)
 
         # Metric that does not depend on the loss function shape
         self.log(
-            "val/invariant",
+            "pd/val/invariant",
             cost
-            + 1e3 * metrics["val/equality/error_mean"]
-            + 1e3 * metrics["val/inequality/error_mean"],
+            + 1e3 * metrics["pd/val/equality/violation_mean"]
+            + 1e3 * metrics["pd/val/inequality/violation_mean"],
             batch_size=batch_size,
             prog_bar=True,
             sync_dist=True,
@@ -524,7 +542,7 @@ class OPFDual(pl.LightningModule):
         constraint_losses = [
             val["loss"]
             for val in constraints.values()
-            if val["loss"] is not None and not torch.isnan(val["loss"])
+            if val.get("loss") is not None and not torch.isnan(val["loss"])
         ]
         if len(constraint_losses) == 0:
             return torch.zeros(1, device=self.device)
@@ -595,11 +613,13 @@ class OPFDual(pl.LightningModule):
         aggregate_metrics = {
             f"{prefix}/cost": [cost],
             f"{prefix}/equality/rate": [],
-            f"{prefix}/equality/error_mean": [],
-            f"{prefix}/equality/error_max": [],
+            f"{prefix}/equality/violation_mean": [],
+            f"{prefix}/equality/violation_max": [],
+            f"{prefix}/equality/violation_min": [],
             f"{prefix}/inequality/rate": [],
-            f"{prefix}/inequality/error_mean": [],
-            f"{prefix}/inequality/error_max": [],
+            f"{prefix}/inequality/violation_mean": [],
+            f"{prefix}/inequality/violation_max": [],
+            f"{prefix}/inequality/violation_min": [],
         }
         if train:
             aggregate_metrics.update(
@@ -618,8 +638,9 @@ class OPFDual(pl.LightningModule):
         detailed_metrics = {}
         reduce_fn = {
             "default": torch.sum,
-            "error_mean": torch.mean,
-            "error_max": torch.max,
+            "violation_mean": torch.mean,
+            "violation_max": torch.max,
+            "violation_min": torch.min,
             "rate": torch.mean,
             "multiplier/mean": torch.mean,
             "multiplier/max": torch.max,
@@ -631,7 +652,13 @@ class OPFDual(pl.LightningModule):
                 if detailed:
                     detailed_metrics[f"{prefix}/{constraint_name}/{value_name}"] = value
                 aggregate_name = f"{prefix}/{constraint_type}/{value_name}"
-                aggregate_metrics[aggregate_name].append(value.reshape(1))
+                if "max" in value_name and "multiplier" not in value_name:
+                    aggregate_metrics[aggregate_name].append(value[0].max().reshape(1))
+                elif "min" in value_name and "multiplier" not in value_name:
+                    aggregate_metrics[aggregate_name].append(value[0].min().reshape(1))
+                else:
+                    aggregate_metrics[aggregate_name].append(value.mean().reshape(1))
+
         for aggregate_name in aggregate_metrics:
             value_name = aggregate_name.rsplit("/", 1)[1]
             fn = (

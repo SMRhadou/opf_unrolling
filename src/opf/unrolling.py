@@ -10,13 +10,41 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn import Parameter
+import torch.nn as nn
 from torch_geometric.data import Data, HeteroData
+
 
 import src.opf.powerflow as pf
 from src.opf.constraints import equality, inequality
 from src.opf.dataset import PowerflowBatch, PowerflowData
 from src.opf.hetero import HeteroGCN, HeteroSage
 
+class SinusoidalTimeEmbedding(nn.Module):
+    """
+    https://nn.labml.ai/diffusion/ddpm/unet.html 
+    """
+    def __init__(self, n_channels: int):
+        super().__init__()
+        self.n_channels = n_channels
+        # self.act = Swish()
+        self.act = nn.LeakyReLU()
+
+        self.lin_embed = nn.Sequential(nn.Flatten(start_dim=-2),
+                                       nn.Linear(self.n_channels // 4, self.n_channels),
+                                       self.act,
+                                       nn.Linear(self.n_channels, self.n_channels)
+                                       )
+        
+    def forward(self, t: torch.Tensor):
+        half_dim = self.n_channels // 8
+        emb = torch.log(torch.Tensor([10000.])) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device = t.device) * -emb.to(t.device))
+        emb = t.unsqueeze(-1) * emb.unsqueeze(0)
+        emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim = -1)
+
+        emb = self.lin_embed(emb)
+        return emb
+    
 
 class OPFUnrolled(pl.LightningModule):
     def __init__(self,
@@ -84,7 +112,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--constraint_eps", type=float, default=0.3)
         group.add_argument("--exploration_rate", type=float, default=0.4)
         group.add_argument("--lr_critic", type=float, default=3e-5)
-        group.add_argument("--lr_actor", type=float, default=3e-6)
+        group.add_argument("--lr_actor", type=float, default=3e-5)
         group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1e-3)
@@ -422,14 +450,17 @@ class OPFUnrolled(pl.LightningModule):
                 self.log(f"{self.mode}/train/{layer}/opf_lagrangian", opf_lagrangian.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
                 constraint_layers[layer] = opf_lagrangian
+
             elif self.mode == 'actor':
                 _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, output_tensors=False
                 )   # Evaluate the OPF objective and Constraints
                 opf_violation_loss = self.constraint_loss(constraints)
-                self.log(f"{self.mode}/train/{layer}/opf_violation_loss", opf_violation_loss.mean(),
+                self.log(f"{self.mode}/train/{layer}/opf_violation_loss", 
+                        opf_violation_loss.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/train/loss/opf_cost", cost.mean(),
+                self.log(f"{self.mode}/train/loss/opf_cost", 
+                        cost.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
                 constraint_layers[layer] = opf_violation_loss
         training_constraints_loss = self.training_constraints(constraint_layers) 
@@ -437,7 +468,11 @@ class OPFUnrolled(pl.LightningModule):
         # Training objective (+/- lagrangian at the last layer)
         if self.mode == 'actor':
             multipliers = multipliers_predictions[layer]
+            # Used for visualization
             opf_constraints, _ = self.constraints(variables, batch.powerflow_parameters, multipliers)
+            supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
+
+            # Computing loss
             loss = _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
                 )   # Evaluate the OPF objective and Constraints
@@ -466,6 +501,8 @@ class OPFUnrolled(pl.LightningModule):
             sync_dist=True)
         
         if self.mode == 'actor':
+            self.log(f"{self.mode}/train/loss/supervised", supervised_loss,
+                batch_size=batch.data.num_graphs, sync_dist=True)
             for name, value in multipliers.items():
                 self.log(f"{self.mode}/train/multipliers/max/{name}", value.max(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
@@ -527,6 +564,7 @@ class OPFUnrolled(pl.LightningModule):
         if self.mode == 'actor':
             multipliers = multipliers_predictions[layer]
             opf_constraints, _ = self.constraints(variables, batch.powerflow_parameters, multipliers)
+            supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
             loss = _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
                 )   # Evaluate the OPF objective and Constraints
@@ -548,6 +586,8 @@ class OPFUnrolled(pl.LightningModule):
         #     self.log(f"{self.mode}/val/best_loss", self.best_val,
         #         batch_size=batch_size, sync_dist=True)
         if self.mode == 'actor':
+            self.log(f"{self.mode}/val/loss/supervised", supervised_loss,
+                batch_size=batch.data.num_graphs, sync_dist=True)
             for name, value in opf_constraints.items():
                 self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].max(),
                     batch_size=batch.data.num_graphs, sync_dist=True)

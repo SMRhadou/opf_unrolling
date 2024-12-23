@@ -107,7 +107,7 @@ def equality(
     loss_tensor, loss = (
         loss_equality(u, multiplier, augmented_weight=augmented_weight)
         if multiplier is not None
-        else None, None
+        else (None, None)
     )
 
     assert not torch.isnan(u).any()

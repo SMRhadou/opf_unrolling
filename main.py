@@ -39,24 +39,24 @@ def main():
     )   # 
     
     # Solver arguments
-    parser.add_argument("--solver", type=str, choices=["unrolling", "primal_dual"], default="unrolling")
-    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default='actor-critic')
-    parser.add_argument('--num_cycles', type=int, default=30)
+    parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="unrolling")
+    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="actor-critic")
+    parser.add_argument('--num_cycles', type=int, default=100)
     
 
     # data arguments
     parser.add_argument("--case_name", type=str, default="case30_ieee")#default="case179_goc__api")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--fast_dev_run", type=int, default=0)
-    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--homo", action="store_true", default=False)
 
     # trainer arguments
     group = parser.add_argument_group("Trainer")
     group.add_argument("--no_gpu", action="store_false", dest="gpu")
-    group.add_argument("--max_epochs", type=int, default=3)
-    group.add_argument("--max_epochs_critic", type=int, default=5)
-    group.add_argument("--max_epochs_actor", type=int, default=5)
+    group.add_argument("--max_epochs_pd", type=int, default=300)
+    group.add_argument("--max_epochs_critic", type=int, default=10)
+    group.add_argument("--max_epochs_actor", type=int, default=3)
     group.add_argument("--patience", type=int, default=15)
     group.add_argument("--gradient_clip_val", type=float, default=0)
 
@@ -72,13 +72,16 @@ def main():
     if params.operation == "study":
         study(params_dict)
     elif params.operation == "train":
-        if params_dict["mode"] in ["critic", "actor"]:
+        if params_dict["solver"] == "pd":
+            trainer = make_trainer(params_dict, "pd")
+            train(trainer, params_dict)
+        elif params_dict["mode"] in ["critic", "actor"]:
             trainer = make_trainer(params_dict, params["mode"])
             train(trainer, params_dict)
         elif params_dict["mode"] == "actor-critic":
-            critic_trainer = make_trainer(params_dict, "critic", callbacks=[])
+            # critic_trainer = make_trainer(params_dict, "critic", callbacks=[])
             actor_trainer = make_trainer(params_dict, "actor", callbacks=[])
-            train((critic_trainer, actor_trainer), params_dict)
+            train(actor_trainer, params_dict)
     else:
         raise ValueError(f"Unknown operation: {params.operation}")
 
@@ -113,8 +116,10 @@ def make_trainer(params, mode, callbacks=[], wandb_kwargs={}):
         # logger specific callbacks
         callbacks += [
             ModelCheckpoint(
-                monitor=f"{mode}/val/loss",
-                dirpath=Path(params["log_dir"]) / "checkpoints" / Path(params["mode"]) / Path(logger.experiment.id) ,
+                monitor=f"{mode}/val/loss" if params["solver"] == "unrolling" else "pd/val/invariant",
+                dirpath=(Path(params["log_dir"]) / "checkpoints" / params["mode"] / Path(logger.experiment.id) if params["mode"] == "actor-critic" 
+                        else Path(params["log_dir"]) / "checkpoints" / Path(mode) / Path(logger.experiment.id)
+                        ),
                 filename=f"best_{mode}",
                 auto_insert_metric_name=False,
                 mode="min",
@@ -142,7 +147,7 @@ def _train(trainer: Trainer, params):
     solver = params['solver']
     
     # initialize NN optimizers
-    if solver == 'primal_dual':
+    if solver == 'pd':
         if params["homo"]:
             # gcn = GCN(in_channels=dm.feature_dims, out_channels=4, **params)
             raise NotImplementedError("Homogenous model not currently implemented.")
@@ -215,19 +220,20 @@ def _train(trainer: Trainer, params):
                 )        
             trainer.fit(model, dm)
         elif params['mode'] == 'actor-critic':
-            critic_trainer, actor_trainer = trainer
+            actor_trainer = trainer
             critic_model = OPFUnrolled(
-                gcn_critic, n_nodes, multiplier_table_length=2e6, mode='critic',
+                gcn_critic, n_nodes, multiplier_table_length=int(500), mode='critic',
                 **{k: v for k, v in params.items() if k != 'mode'})
             
             actor_model = OPFUnrolled(
                 gcn_actor, n_nodes, aux_model=copy.deepcopy(gcn_critic),
-                multiplier_table_length=2e6, mode='actor',
+                multiplier_table_length=int(500), mode='actor',
                 **{k: v for k, v in params.items() if k != 'mode'})
 
             best_critic_loss = torch.inf
             best_actor_loss = torch.inf
             for cycle in range(params['num_cycles']):
+                critic_trainer = make_trainer(params, "critic", callbacks=[])
                 critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000)
                 critic_trainer.fit(critic_model, dm)
                 checkpoint = f'logs/checkpoints/actor-critic/{critic_trainer.logger.experiment.id}/best_critic.ckpt'
@@ -244,12 +250,10 @@ def _train(trainer: Trainer, params):
                 reset_trainer(critic_trainer), reset_trainer(actor_trainer)
 
                 # logging beast losses
-                critic_trainer.logger.log_metrics({'best_critic_loss': best_critic_loss})
+                # critic_trainer.logger.log_metrics({'best_critic_loss': best_critic_loss})
                 actor_trainer.logger.log_metrics({'best_actor_loss': best_actor_loss})
 
-                
-
-    elif solver == 'primal_dual':
+    elif solver == 'pd':
         model = OPFDual(
             gcn, n_nodes, multiplier_table_length=len(dm.train_dataset) if params["personalize"] else 0, **params  # type: ignore
         )
