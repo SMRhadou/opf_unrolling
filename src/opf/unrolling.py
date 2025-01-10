@@ -109,14 +109,14 @@ class OPFUnrolled(pl.LightningModule):
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
-        group.add_argument("--constraint_eps", type=float, default=0.3)
+        group.add_argument("--constraint_eps", type=float, default=0.2)
         group.add_argument("--exploration_rate", type=float, default=0.4)
         group.add_argument("--lr_critic", type=float, default=3e-5)
         group.add_argument("--lr_actor", type=float, default=3e-5)
         group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1e-3)
-        group.add_argument("--lr_common_actor", type=float, default=1e-1)
+        group.add_argument("--lr_common_actor", type=float, default=1e-2)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         group.add_argument("--enforce_constraints", action="store_true", default=False)
@@ -185,7 +185,7 @@ class OPFUnrolled(pl.LightningModule):
             #     torch.zeros(self.n_multipliers, device=self.device)
             # )     
 
-    def get_rand_multipliers(self, idx: torch.Tensor, Lmax=5) -> dict[str, torch.Tensor]:
+    def get_rand_multipliers(self, idx: torch.Tensor, Lmax=15) -> dict[str, torch.Tensor]:
         n_equality = self.multiplier_offsets[2]
         multipliers = torch.zeros(idx.shape[0], self.n_multipliers, device=self.device)
         multipliers[:, :n_equality] = 2*Lmax * (torch.rand(idx.shape[0], n_equality, device=self.device)-0.5)

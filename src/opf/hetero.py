@@ -439,7 +439,7 @@ class HeteroSage(nn.Module):
             help="Number of hidden features on each layer.",
         )
         group.add_argument(
-            "--n_layers", type=int, default=3, help="Number of GNN layers."
+            "--n_layers", type=int, default=8, help="Number of GNN layers."
         )
         group.add_argument(
             "--mlp_read_layers",

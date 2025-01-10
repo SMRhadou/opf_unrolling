@@ -179,16 +179,16 @@ class OPFDual(pl.LightningModule):
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFDual")
-        group.add_argument("--lr", type=float, default=3e-4)
+        group.add_argument("--lr", type=float, default=2.76e-4)
         group.add_argument("--weight_decay", type=float, default=0.0)
-        group.add_argument("--lr_dual", type=float, default=0.1)
-        group.add_argument("--lr_common", type=float, default=0.01)
+        group.add_argument("--lr_dual", type=float, default=9.18e-4)
+        group.add_argument("--lr_common", type=float, default=2.77e-4)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         group.add_argument("--enforce_constraints", action="store_true", default=False)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
-        group.add_argument("--augmented_weight", type=float, default=0.30)
+        group.add_argument("--augmented_weight", type=float, default=10.00)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
         group.add_argument("--warmup", type=int, default=0)
@@ -372,8 +372,8 @@ class OPFDual(pl.LightningModule):
         loss = (
             self.cost_weight * cost / batch.powerflow_parameters.n_gen
             + constraint_loss
-            + self.powerflow_weight * powerflow_loss
-            + supervised_weight * supervised_loss
+            # + self.powerflow_weight * powerflow_loss
+            # + supervised_weight * supervised_loss
         )
 
         primal_optimizer.zero_grad()

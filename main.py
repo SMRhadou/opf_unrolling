@@ -22,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # program arguments
-    parser.add_argument("--operation", default="train", choices=["train", "study"])
+    parser.add_argument("--operation", default="study", choices=["train", "study"])
     parser.add_argument("--run_name", type=str, default="actor_training")
     parser.add_argument("--log_dir", type=str, default="./logs")
     parser.add_argument("--data_dir", type=str, default="./data")
@@ -35,20 +35,20 @@ def main():
         "--no_compile", action="store_false", dest="compile", default=False
     )   # use torch compile
     parser.add_argument(
-        "--no_personalize", action="store_false", dest="personalize", default=False
+        "--no_personalize", action="store_false", dest="personalize", default=True
     )   # 
     
     # Solver arguments
     parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="unrolling")
-    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="actor-critic")
+    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="critic")
     parser.add_argument('--num_cycles', type=int, default=100)
     
 
     # data arguments
-    parser.add_argument("--case_name", type=str, default="case30_ieee")#default="case179_goc__api")
+    parser.add_argument("--case_name", type=str, default="case57_ieee")#default="case179_goc__api")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--fast_dev_run", type=int, default=0)
-    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--homo", action="store_true", default=False)
 
     # trainer arguments
@@ -57,14 +57,17 @@ def main():
     group.add_argument("--max_epochs_pd", type=int, default=300)
     group.add_argument("--max_epochs_critic", type=int, default=10)
     group.add_argument("--max_epochs_actor", type=int, default=3)
-    group.add_argument("--patience", type=int, default=15)
+    group.add_argument("--patience", type=int, default=50)
     group.add_argument("--gradient_clip_val", type=float, default=0)
-
-    # the gnn being used
-    critic_heteroSage.add_args(parser)
-    actor_heteroSage.add_args(parser)
-    OPFUnrolled.add_args(parser)
-
+    
+    params = parser.parse_args()
+    if params.solver == 'unrolling':
+        critic_heteroSage.add_args(parser)
+        actor_heteroSage.add_args(parser)
+        OPFUnrolled.add_args(parser)
+    elif params.solver == 'pd':
+        HeteroSage.add_args(parser)
+        OPFDual.add_args(parser)
     params = parser.parse_args()
     params_dict = vars(params)
 
@@ -222,12 +225,12 @@ def _train(trainer: Trainer, params):
         elif params['mode'] == 'actor-critic':
             actor_trainer = trainer
             critic_model = OPFUnrolled(
-                gcn_critic, n_nodes, multiplier_table_length=int(500), mode='critic',
+                gcn_critic, n_nodes, multiplier_table_length=int(50000), mode='critic',
                 **{k: v for k, v in params.items() if k != 'mode'})
             
             actor_model = OPFUnrolled(
                 gcn_actor, n_nodes, aux_model=copy.deepcopy(gcn_critic),
-                multiplier_table_length=int(500), mode='actor',
+                multiplier_table_length=int(50000), mode='actor',
                 **{k: v for k, v in params.items() if k != 'mode'})
 
             best_critic_loss = torch.inf
@@ -273,10 +276,10 @@ def train(trainer: Trainer, params):
 
 
 def study(params: dict):
-    study_name = "opf-5"
-    storage = os.environ["OPTUNA_STORAGE"]
+    study_name = "opf-critic"
+    storage = os.environ.get("STORAGE", "sqlite:///opf.db")
     pruner = optuna.pruners.HyperbandPruner(
-        min_resource=50, max_resource=1000, reduction_factor=3
+        min_resource=1, max_resource=50, reduction_factor=2
     )
     study = optuna.create_study(
         study_name=study_name,
@@ -287,7 +290,7 @@ def study(params: dict):
     )
     study.optimize(
         partial(objective, default_params=params),
-        n_trials=1,
+        n_trials=100, show_progress_bar=True
     )
 
 
@@ -298,37 +301,80 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
         lr_dual=trial.suggest_float("lr_dual", 1e-5, 1.0, log=True),
         lr_common=trial.suggest_float("lr_common", 1e-5, 1.0, log=True),
         weight_decay_dual=trial.suggest_float("weight_decay_dual", 1e-16, 1, log=True),
-        dropout=trial.suggest_float("dropout", 0, 1),
-        supervised_weight=100.0,
-        augmented_weight=10.0,
-        powerflow_weight=1.0,
-        case_name="case118_ieee",
-        n_layers=20,
-        batch_size=100,
-        n_channels=128,
+        dropout=0.0,#trial.suggest_float("dropout", 0, 1),
+        supervised_weight=0.0,
+        augmented_weight=trial.suggest_float("augmented_weight", 0.1, 10.0),#10.0,
+        powerflow_weight=0.0,
+        case_name="case57_ieee",
+        # n_layers=trial.suggest_int("n_layers", 3, 10),
+        batch_size=32,
+        n_channels=2**trial.suggest_int("n_channels", 5, 8),
         cost_weight=1.0,
-        equality_weight=1e3,
-        max_epochs=1000,
-        patience=1000,
+        max_epochs_pd=100,
+        max_epochs_critic=20,
+        max_epochs_actor=20,
+        patience=20,
         warmup=10,
         supervised_warmup=20,
         # # MLP parameteers
         mlp_hidden_channels=512,
         mlp_read_layers=2,
         mlp_per_gnn_layers=2,
+        # unrolling parameters
+        lr_actor=trial.suggest_float("lr_actor", 1e-5, 1e-2, log=True),
+        lr_critic=trial.suggest_float("lr_critic", 1e-5, 1e-2, log=True),
+        lr_common_actor=trial.suggest_float("lr_common_actor", 1e-5, 1.0, log=True),
+        lr_common_critic=trial.suggest_float("lr_common_critic", 1e-5, 1.0, log=True),
+        constraint_eps = trial.suggest_float("constraint_eps", 0.01, 0.5),
+        #exploration_rate = trial.suggest_float("exploration_rate", 0.01, 1.0),
+        n_layers_critic=trial.suggest_int("n_layers_critic", 3, 10),
+        n_layers_actor=trial.suggest_int("n_layers_actor", 3, 10),
+        n_sub_layer_actor=trial.suggest_int("n_sub_layer_actor", 3, 10),
+
     )
     params = {**default_params, **params}
-    trainer = make_trainer(
-        params,
-        callbacks=[
-            optuna.integration.PyTorchLightningPruningCallback(
-                trial, monitor="val/invariant"
-            )
-        ],
-        wandb_kwargs=dict(group=trial.study.study_name),
-    )
+    mode = params["mode"]
+    
+    if params["solver"] == "pd":
+        trainer = make_trainer(params, "pd",
+                               callbacks=[
+                                optuna.integration.PyTorchLightningPruningCallback(
+                                    trial, monitor=f"pd/val/invariant"
+                                )
+                            ],
+                            wandb_kwargs=dict(group=trial.study.study_name),)
+        train(trainer, params)
+    elif params["mode"] in ["critic", "actor"]:
+        trainer = make_trainer(params, params["mode"],
+                               callbacks=[
+                                optuna.integration.PyTorchLightningPruningCallback(
+                                    trial, monitor=f"{mode}/val/loss"
+                                )
+                            ],
+                            wandb_kwargs=dict(group=trial.study.study_name),)
+        train(trainer, params)
+    elif params["mode"] == "actor-critic":
+        # critic_trainer = make_trainer(params_dict, "critic", callbacks=[])
+        actor_trainer = make_trainer(params, "actor", callbacks=[
+                                optuna.integration.PyTorchLightningPruningCallback(
+                                    trial, monitor=f"{mode}/val/loss"
+                                )
+                            ],
+                            wandb_kwargs=dict(group=trial.study.study_name),)
+        train(actor_trainer, params)
 
-    train(trainer, params)
+    # trainer = make_trainer(
+    #     params,
+    #     None,
+    #     callbacks=[
+    #         optuna.integration.PyTorchLightningPruningCallback(
+    #             trial, monitor="val/invariant"
+    #         )
+    #     ],
+    #     wandb_kwargs=dict(group=trial.study.study_name),
+    # )
+
+    # train(trainer, params)
 
     # finish up
     if isinstance(trainer.logger, WandbLogger):
@@ -337,7 +383,12 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
         logger.finalize("finished")
 
     print(trainer.callback_metrics)
-    return trainer.callback_metrics["val/invariant"].item()
+    if params["solver"] == "pd":
+        return trainer.callback_metrics["pd/val/invariant"].item()
+    elif params["mode"] in ["critic", "actor"]:
+        return trainer.callback_metrics[f"{mode}/val/loss"].item()
+    elif params["mode"] == "actor-critic":
+        return trainer.callback_metrics["actor/val/loss"].item()
 
 
 if __name__ == "__main__":
