@@ -22,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # program arguments
-    parser.add_argument("--operation", default="study", choices=["train", "study"])
+    parser.add_argument("--operation", default="train", choices=["train", "study"])
     parser.add_argument("--run_name", type=str, default="actor_training")
     parser.add_argument("--log_dir", type=str, default="./logs")
     parser.add_argument("--data_dir", type=str, default="./data")
@@ -40,7 +40,7 @@ def main():
     
     # Solver arguments
     parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="unrolling")
-    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="critic")
+    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="actor")
     parser.add_argument('--num_cycles', type=int, default=100)
     
 
@@ -55,8 +55,8 @@ def main():
     group = parser.add_argument_group("Trainer")
     group.add_argument("--no_gpu", action="store_false", dest="gpu")
     group.add_argument("--max_epochs_pd", type=int, default=300)
-    group.add_argument("--max_epochs_critic", type=int, default=10)
-    group.add_argument("--max_epochs_actor", type=int, default=3)
+    group.add_argument("--max_epochs_critic", type=int, default=1000)
+    group.add_argument("--max_epochs_actor", type=int, default=1000)
     group.add_argument("--patience", type=int, default=50)
     group.add_argument("--gradient_clip_val", type=float, default=0)
     
@@ -79,7 +79,7 @@ def main():
             trainer = make_trainer(params_dict, "pd")
             train(trainer, params_dict)
         elif params_dict["mode"] in ["critic", "actor"]:
-            trainer = make_trainer(params_dict, params["mode"])
+            trainer = make_trainer(params_dict, params_dict["mode"])
             train(trainer, params_dict)
         elif params_dict["mode"] == "actor-critic":
             # critic_trainer = make_trainer(params_dict, "critic", callbacks=[])
@@ -215,7 +215,8 @@ def _train(trainer: Trainer, params):
             trainer.fit(model, dm)
         elif params['mode'] == 'actor':
             # load the critic
-            checkpoint = f'logs/checkpoints/critic/3lheyqhg/best.ckpt'
+            # checkpoint = f'logs/checkpoints/critic/3lheyqhg/best.ckpt'
+            checkpoint = f'logs/checkpoints/critic/gl8empy9/best_critic.ckpt'
             critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)
             model = OPFUnrolled(
                 gcn_actor, n_nodes, aux_model=critic_model.model,
@@ -276,8 +277,8 @@ def train(trainer: Trainer, params):
 
 
 def study(params: dict):
-    study_name = "opf-critic"
-    storage = os.environ.get("STORAGE", "sqlite:///opf.db")
+    study_name = "opf-actor"
+    storage = os.environ.get("STORAGE", "sqlite:///opf-actor.db")
     pruner = optuna.pruners.HyperbandPruner(
         min_resource=1, max_resource=50, reduction_factor=2
     )
@@ -303,33 +304,33 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
         weight_decay_dual=trial.suggest_float("weight_decay_dual", 1e-16, 1, log=True),
         dropout=0.0,#trial.suggest_float("dropout", 0, 1),
         supervised_weight=0.0,
-        augmented_weight=trial.suggest_float("augmented_weight", 0.1, 10.0),#10.0,
+        # augmented_weight=trial.suggest_float("augmented_weight", 0.1, 10.0),#10.0,
         powerflow_weight=0.0,
         case_name="case57_ieee",
         # n_layers=trial.suggest_int("n_layers", 3, 10),
         batch_size=32,
-        n_channels=2**trial.suggest_int("n_channels", 5, 8),
+        # n_channels=2**trial.suggest_int("n_channels", 5, 8),
         cost_weight=1.0,
         max_epochs_pd=100,
-        max_epochs_critic=20,
-        max_epochs_actor=20,
+        max_epochs_critic=50,
+        max_epochs_actor=30,
         patience=20,
         warmup=10,
         supervised_warmup=20,
         # # MLP parameteers
-        mlp_hidden_channels=512,
-        mlp_read_layers=2,
-        mlp_per_gnn_layers=2,
+        # mlp_hidden_channels=512,
+        # mlp_read_layers=2,
+        # mlp_per_gnn_layers=2,
         # unrolling parameters
-        lr_actor=trial.suggest_float("lr_actor", 1e-5, 1e-2, log=True),
+        lr_actor=trial.suggest_float("lr_actor", 1e-5, 1e-3, log=True),
+        lr_common_actor=trial.suggest_float("lr_common_actor", 1e-3, 0.1, log=True),
         lr_critic=trial.suggest_float("lr_critic", 1e-5, 1e-2, log=True),
-        lr_common_actor=trial.suggest_float("lr_common_actor", 1e-5, 1.0, log=True),
         lr_common_critic=trial.suggest_float("lr_common_critic", 1e-5, 1.0, log=True),
-        constraint_eps = trial.suggest_float("constraint_eps", 0.01, 0.5),
+        # constraint_eps = trial.suggest_float("constraint_eps", 0.01, 0.4),
         #exploration_rate = trial.suggest_float("exploration_rate", 0.01, 1.0),
-        n_layers_critic=trial.suggest_int("n_layers_critic", 3, 10),
-        n_layers_actor=trial.suggest_int("n_layers_actor", 3, 10),
-        n_sub_layer_actor=trial.suggest_int("n_sub_layer_actor", 3, 10),
+        # n_layers_critic=trial.suggest_int("n_layers_critic", 3, 10),
+        n_layers_actor=trial.suggest_int("n_layers_actor", 4, 8),
+        n_sub_layer_actor=1#trial.suggest_int("n_sub_layer_actor", 1, 2),
 
     )
     params = {**default_params, **params}

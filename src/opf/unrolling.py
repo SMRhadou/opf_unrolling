@@ -109,20 +109,20 @@ class OPFUnrolled(pl.LightningModule):
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
-        group.add_argument("--constraint_eps", type=float, default=0.2)
+        group.add_argument("--constraint_eps", type=float, default=0.257)
         group.add_argument("--exploration_rate", type=float, default=0.4)
-        group.add_argument("--lr_critic", type=float, default=3e-5)
+        group.add_argument("--lr_critic", type=float, default=2.96e-4)
         group.add_argument("--lr_actor", type=float, default=3e-5)
         group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
-        group.add_argument("--lr_common_critic", type=float, default=1e-3)
-        group.add_argument("--lr_common_actor", type=float, default=1e-2)
+        group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
+        group.add_argument("--lr_common_actor", type=float, default=1e-1)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         group.add_argument("--enforce_constraints", action="store_true", default=False)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
-        group.add_argument("--augmented_weight", type=float, default=0.30)
+        group.add_argument("--augmented_weight", type=float, default=0.54)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
         group.add_argument("--warmup", type=int, default=0)
@@ -473,7 +473,7 @@ class OPFUnrolled(pl.LightningModule):
             supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
 
             # Computing loss
-            loss = _, constraints, cost = self._step_helper(
+            _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
                 )   # Evaluate the OPF objective and Constraints
             constraint_loss = self.constraint_loss(constraints)
@@ -565,7 +565,7 @@ class OPFUnrolled(pl.LightningModule):
             multipliers = multipliers_predictions[layer]
             opf_constraints, _ = self.constraints(variables, batch.powerflow_parameters, multipliers)
             supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
-            loss = _, constraints, cost = self._step_helper(
+            _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
                 )   # Evaluate the OPF objective and Constraints
             constraint_loss = self.constraint_loss(constraints)
@@ -579,6 +579,8 @@ class OPFUnrolled(pl.LightningModule):
             
         loss = loss + val_constraints_loss
         self.log(f"{self.mode}/val/loss", loss,
+            batch_size=batch_size, sync_dist=True)
+        self.log(f"{self.mode}/val/constraints", val_constraints_loss,
             batch_size=batch_size, sync_dist=True)
     
         # if loss < self.best_val:
