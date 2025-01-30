@@ -347,7 +347,7 @@ class HeteroDictMLP(nn.Module):
             x_dict = self.lins[i](x_dict)
             if last_layer and self.plain_last:
                 continue
-            if self.norms:
+            if self.norms and not last_layer:
                 x_dict = {
                     node_type: self.norms[i][node_type](x)  # type: ignore
                     for node_type, x in x_dict.items()
@@ -651,7 +651,7 @@ class critic_heteroSage(HeteroSage):
             out_channels=out_channels,
             num_layers=mlp_read_layers,
             dropout=dropout,
-            plain_last=True,
+            plain_last=False,
             node_types=node_types,
             act=nn.Tanh(),
         )
@@ -870,7 +870,7 @@ class actor_heteroSage(HeteroSage):
             out_channels=lambda_channels,
             num_layers=mlp_read_layers,
             dropout=dropout,
-            plain_last=True,
+            plain_last=False,
             node_types=node_types,
             act=nn.Tanh(),
         )
