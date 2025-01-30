@@ -72,6 +72,7 @@ class OPFUnrolled(pl.LightningModule):
         supervised_warmup: int = 0,
         common: bool = True,
         forget: bool =True,
+        update_common_multipliers: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -99,6 +100,7 @@ class OPFUnrolled(pl.LightningModule):
         self.supervised_warmup = supervised_warmup
         self.common = common
         self.forget = forget
+        self.update_common_multipliers = update_common_multipliers
         n_bus, n_branch, n_gen = n_nodes
         self.init_multipliers(n_bus, n_gen, n_branch)
         self.init_training_multipliers()
@@ -109,15 +111,15 @@ class OPFUnrolled(pl.LightningModule):
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
-        group.add_argument("--constraint_eps", type=float, default=0.257)
-        group.add_argument("--exploration_rate", type=float, default=0.4)
+        group.add_argument("--constraint_eps", type=float, default=0.38)
+        group.add_argument("--exploration_rate", type=float, default=0)
         group.add_argument("--lr_critic", type=float, default=2.96e-4)
-        group.add_argument("--lr_actor", type=float, default=3e-5)
-        group.add_argument("--weight_decay", type=float, default=0.0)
+        group.add_argument("--lr_actor", type=float, default=3.2e-4)
+        group.add_argument("--weight_decay", type=float, default=0.011)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
-        group.add_argument("--lr_common_actor", type=float, default=1e-1)
-        group.add_argument("--weight_decay_dual", type=float, default=0.0)
+        group.add_argument("--lr_common_actor", type=float, default=0.272)
+        group.add_argument("--weight_decay_dual", type=float, default=0.253)
         group.add_argument("--eps", type=float, default=1e-3)
         group.add_argument("--enforce_constraints", action="store_true", default=False)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
@@ -193,7 +195,7 @@ class OPFUnrolled(pl.LightningModule):
 
         if hasattr(self, 'exploitation_dataset') and list(self.exploitation_dataset.values())[0] != []:
             exploitation_indices = torch.randperm(len(list(self.exploitation_dataset.values())[0]))[:idx.shape[0]]
-            exploration_rate = torch.rand(idx.shape[0], device=self.device) < self.exploration_rate
+            exploration_ex = torch.rand(idx.shape[0], device=self.device) < self.exploration_rate
         
         multiplier_dict = {}
         for data, (name, shape) in zip(
@@ -203,10 +205,10 @@ class OPFUnrolled(pl.LightningModule):
             if hasattr(self, 'exploitation_dataset') and self.exploitation_dataset[name] != []:
                 assert self.mode == 'critic'
                 view_shape = (idx.shape[0],) + shape
-                exploration_rate_view = exploration_rate.view(-1, *([1] * len(shape)))
+                exploration_ex_view = exploration_ex.view(-1, *([1] * len(shape)))
                 multiplier_dict[name] = (
-                    data.view(view_shape) * exploration_rate_view
-                    + self.exploitation_dataset[name][exploitation_indices].to(self.device) * ~exploration_rate_view
+                    data.view(view_shape) * exploration_ex_view
+                    + self.exploitation_dataset[name][exploitation_indices].to(self.device) * ~exploration_ex_view
                 )
             else:
                 multiplier_dict[name] = data.view((idx.shape[0],) + shape)
@@ -235,12 +237,15 @@ class OPFUnrolled(pl.LightningModule):
 
     def _update_multiplier_table(self, multipliers: Dict[str, Dict]):
         with torch.no_grad():
-            for multiplier_dict in multipliers.values():
+            for layer, multiplier_dict in multipliers.items():
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
-                        self.multiplier_table[name] += value.detach().cpu()
-                    if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
-                        self.multiplier_table[name] = self.multiplier_table[name][-self.multiplier_table_length :]
+                        self.multiplier_table[name] += value.detach().cpu() 
+                    # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
+                    #     self.multiplier_table[name] = self.multiplier_table[name][-self.multiplier_table_length :]
+                    self.log(f"{layer}/multipliers_dataset/{name}/max", value.detach().cpu().max())
+                    self.log(f"{layer}/multipliers_dataset/{name}/mean", value.detach().cpu().mean())
+                
     
     def _generate_exploitation_dataset(self, multipliers: list[torch.Tensor], n_samples: int):
         """
@@ -410,6 +415,9 @@ class OPFUnrolled(pl.LightningModule):
             return variables, constraints, cost
 
     def on_train_epoch_start(self):
+        self.multiplier_table = {
+                name: [] for name in self.multiplier_metadata.keys()
+            }
         # _, dual_optimizer, _ = self.optimizers()  # type: ignore
         # dual_optimizer.zero_grad()
         pass
@@ -429,7 +437,7 @@ class OPFUnrolled(pl.LightningModule):
         # Forward Step
         multipliers = self.get_rand_multipliers(batch.index)
         layer_predictions, multipliers_predictions = self(batch, multipliers)
-        if self.mode == 'actor':
+        if self.mode == 'actor' and self.update_common_multipliers and self.current_epoch >= 0:
             self._update_multiplier_table(multipliers_predictions)
 
         # evaluate training descending constraints
@@ -510,7 +518,7 @@ class OPFUnrolled(pl.LightningModule):
                     batch_size=batch.data.num_graphs, sync_dist=True)
                 # show opf constraints
             for name, value in opf_constraints.items():
-                self.log(f"{self.mode}/train/constraints/max/{name}", value['violation_max'][0].max(),
+                self.log(f"{self.mode}/train/constraints/max/{name}", value['violation_max'][0].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
                 self.log(f"{self.mode}/train/constraints/mean/{name}", value['violation_mean'].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
@@ -591,7 +599,7 @@ class OPFUnrolled(pl.LightningModule):
             self.log(f"{self.mode}/val/loss/supervised", supervised_loss,
                 batch_size=batch.data.num_graphs, sync_dist=True)
             for name, value in opf_constraints.items():
-                self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].max(),
+                self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
                 self.log(f"{self.mode}/val/constraints/mean/{name}", value['violation_mean'].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)

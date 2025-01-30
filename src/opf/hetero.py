@@ -644,6 +644,18 @@ class critic_heteroSage(HeteroSage):
         self.out_channels = out_channels
         self.skip_connection = skip_connection
         print('skip_connection:', self.skip_connection)
+
+        self.readout = HeteroDictMLP(
+            in_channels=n_channels,
+            hidden_channels=mlp_hidden_channels,
+            out_channels=out_channels,
+            num_layers=mlp_read_layers,
+            dropout=dropout,
+            plain_last=True,
+            node_types=node_types,
+            act=nn.Tanh(),
+        )
+
         self.residual_blocks = nn.ModuleList()
         for i in range(n_layers_critic):
             conv = gnn.HeteroConv(
@@ -786,10 +798,10 @@ class actor_heteroSage(HeteroSage):
         #     help="Number of hidden features on each layer.",
         # )
         group.add_argument(
-            "--n_layers_actor", type=int, default=10, help="Number of GNN layers."
+            "--n_layers_actor", type=int, default=6, help="Number of GNN layers."
         )
         group.add_argument(
-            "--n_sub_layer_actor", type=int, default=1, help="Number of sub layers in each actor layer."
+            "--n_sub_layer_actor", type=int, default=2, help="Number of sub layers in each actor layer."
         )
         # group.add_argument(
         #     "--mlp_read_layers",
@@ -851,6 +863,18 @@ class actor_heteroSage(HeteroSage):
         self.y_channels = y_channels
         self.skip_connection = skip_connection
         self.sub_layers_actor = n_sub_layer_actor
+
+        self.readout = HeteroDictMLP(
+            in_channels=n_channels,
+            hidden_channels=mlp_hidden_channels,
+            out_channels=lambda_channels,
+            num_layers=mlp_read_layers,
+            dropout=dropout,
+            plain_last=True,
+            node_types=node_types,
+            act=nn.Tanh(),
+        )
+
         self.residual_blocks = nn.ModuleList()
         for i in range(n_layers_actor):
             sub_layers = nn.ModuleList()
@@ -938,7 +962,7 @@ class actor_heteroSage(HeteroSage):
                     ], dim=1
                 ) for node_type in x_dict.keys()
             }
-            m_outputs['{}'.format(i+1)] = self.multipliers_raw(multipliers, multipliers_location, batch_size)
+            m_outputs['{}'.format(i+1)] = self.multipliers_raw(multipliers, multipliers_location, batch_size)   # A matter of formatting
             y_outputs['{}'.format(i)] = {
                 node_type: 
                     x_dict[node_type][:, self.x_channels+self.lambda_channels:] 
