@@ -4,6 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict
+import copy
 
 import lightning.pytorch as pl
 import numpy as np
@@ -68,6 +69,7 @@ class OPFUnrolled(pl.LightningModule):
         augmented_weight: float = 0.0,
         supervised_weight: float = 0.0,
         powerflow_weight: float = 0.0,
+        noise_std: float = 0.1,
         warmup: int = 0,
         supervised_warmup: int = 0,
         common: bool = True,
@@ -96,6 +98,7 @@ class OPFUnrolled(pl.LightningModule):
         self.augmented_weight = augmented_weight
         self.supervised_weight = supervised_weight
         self.powerflow_weight = powerflow_weight
+        self.noise_std = noise_std
         self.warmup = warmup
         self.supervised_warmup = supervised_warmup
         self.common = common
@@ -111,15 +114,15 @@ class OPFUnrolled(pl.LightningModule):
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
-        group.add_argument("--constraint_eps", type=float, default=0.38)
-        group.add_argument("--exploration_rate", type=float, default=0)
+        group.add_argument("--constraint_eps", type=float, default=0.1)
+        group.add_argument("--exploration_rate", type=float, default=0.3)
         group.add_argument("--lr_critic", type=float, default=2.96e-4)
-        group.add_argument("--lr_actor", type=float, default=3.2e-4)
-        group.add_argument("--weight_decay", type=float, default=0.011)
+        group.add_argument("--lr_actor", type=float, default=1e-5)
+        group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
-        group.add_argument("--lr_common_actor", type=float, default=0.272)
-        group.add_argument("--weight_decay_dual", type=float, default=0.253)
+        group.add_argument("--lr_common_actor", type=float, default=1e-3)
+        group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         group.add_argument("--enforce_constraints", action="store_true", default=False)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
@@ -127,6 +130,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--augmented_weight", type=float, default=0.54)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
+        group.add_argument("--noise_std", type=float, default=0.5)
         group.add_argument("--warmup", type=int, default=0)
         group.add_argument("--supervised_warmup", type=int, default=0)
         group.add_argument("--no_common", dest="common", action="store_false", default=False)
@@ -161,6 +165,10 @@ class OPFUnrolled(pl.LightningModule):
                 name: [] for name in self.multiplier_metadata.keys()
             }
 
+            self.longterm_multiplier_table = {
+                name: [] for name in self.multiplier_metadata.keys()
+            }
+
             # multiplier_inequality_mask_list = []
             # for name, numel in zip(
             #     self.multiplier_metadata.keys(), self.multiplier_numel
@@ -187,14 +195,15 @@ class OPFUnrolled(pl.LightningModule):
             #     torch.zeros(self.n_multipliers, device=self.device)
             # )     
 
-    def get_rand_multipliers(self, idx: torch.Tensor, Lmax=15) -> dict[str, torch.Tensor]:
+    def get_rand_multipliers(self, idx: torch.Tensor, Lmax=1) -> dict[str, torch.Tensor]:
         n_equality = self.multiplier_offsets[2]
         multipliers = torch.zeros(idx.shape[0], self.n_multipliers, device=self.device)
+        # Lmax = Lmax if self.mode == 'critic' else 1 
         multipliers[:, :n_equality] = 2*Lmax * (torch.rand(idx.shape[0], n_equality, device=self.device)-0.5)
         multipliers[:, n_equality:] = Lmax * torch.rand(idx.shape[0], self.n_multipliers - n_equality, device=self.device)
 
         if hasattr(self, 'exploitation_dataset') and list(self.exploitation_dataset.values())[0] != []:
-            exploitation_indices = torch.randperm(len(list(self.exploitation_dataset.values())[0]))[:idx.shape[0]]
+            # exploitation_indices = torch.randperm(len(list(self.exploitation_dataset.values())[0]))[:idx.shape[0]]
             exploration_ex = torch.rand(idx.shape[0], device=self.device) < self.exploration_rate
         
         multiplier_dict = {}
@@ -204,11 +213,12 @@ class OPFUnrolled(pl.LightningModule):
         ):
             if hasattr(self, 'exploitation_dataset') and self.exploitation_dataset[name] != []:
                 assert self.mode == 'critic'
+                exploitation_indices = torch.randperm(self.exploitation_dataset[name].numel())
                 view_shape = (idx.shape[0],) + shape
                 exploration_ex_view = exploration_ex.view(-1, *([1] * len(shape)))
                 multiplier_dict[name] = (
                     data.view(view_shape) * exploration_ex_view
-                    + self.exploitation_dataset[name][exploitation_indices].to(self.device) * ~exploration_ex_view
+                    + (self.exploitation_dataset[name].view(-1)[exploitation_indices].view(self.exploitation_dataset[name].shape))[:idx.shape[0]].to(self.device) * ~exploration_ex_view
                 )
             else:
                 multiplier_dict[name] = data.view((idx.shape[0],) + shape)
@@ -235,16 +245,19 @@ class OPFUnrolled(pl.LightningModule):
             self.multipliers_common.data[self.multiplier_inequality_mask].relu_()
         )
 
-    def _update_multiplier_table(self, multipliers: Dict[str, Dict]):
+    def _update_multiplier_table(self, multipliers: Dict[str, Dict], rho=0.1):
         with torch.no_grad():
             for layer, multiplier_dict in multipliers.items():
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
-                        self.multiplier_table[name] += value.detach().cpu() 
+                        self.multiplier_table[name] += value.detach().cpu() + rho * torch.rand_like(value.detach().cpu())
+                        indices = torch.randperm(len(value))[:10]
+                        self.longterm_multiplier_table[name] += value[indices].detach().cpu()
                     # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
                     #     self.multiplier_table[name] = self.multiplier_table[name][-self.multiplier_table_length :]
-                    self.log(f"{layer}/multipliers_dataset/{name}/max", value.detach().cpu().max())
-                    self.log(f"{layer}/multipliers_dataset/{name}/mean", value.detach().cpu().mean())
+                        self.log(f"{layer}/multipliers_dataset/{name}/max", value.detach().cpu().max())
+                        self.log(f"{layer}/multipliers_dataset/{name}/mean", value.detach().cpu().mean())
+                        self.log(f"{layer}/multipliers_dataset/{name}/var", value.detach().cpu().var().sqrt())
                 
     
     def _generate_exploitation_dataset(self, multipliers: list[torch.Tensor], n_samples: int):
@@ -438,7 +451,7 @@ class OPFUnrolled(pl.LightningModule):
         multipliers = self.get_rand_multipliers(batch.index)
         layer_predictions, multipliers_predictions = self(batch, multipliers)
         if self.mode == 'actor' and self.update_common_multipliers and self.current_epoch >= 0:
-            self._update_multiplier_table(multipliers_predictions)
+            self._update_multiplier_table(multipliers_predictions, self.noise_std)
 
         # evaluate training descending constraints
         constraint_layers = OrderedDict()
@@ -520,7 +533,11 @@ class OPFUnrolled(pl.LightningModule):
             for name, value in opf_constraints.items():
                 self.log(f"{self.mode}/train/constraints/max/{name}", value['violation_max'][0].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/train/constraints/mean/{name}", value['violation_mean'].mean(),
+                self.log(f"{self.mode}/train/constraints/total/{name}", value['violation_mean'].mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/train/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/train/constraints/rate/{name}", value['rate'],
                     batch_size=batch.data.num_graphs, sync_dist=True)
 
         self.log(f"{self.mode}/train/loss/opf_lagrangian", opf_lagrangian.mean(),
@@ -571,7 +588,7 @@ class OPFUnrolled(pl.LightningModule):
         # Training objective (+/- lagrangian at the last layer)
         if self.mode == 'actor':
             multipliers = multipliers_predictions[layer]
-            opf_constraints, _ = self.constraints(variables, batch.powerflow_parameters, multipliers)
+            opf_constraints, cost = self.constraints(variables, batch.powerflow_parameters, multipliers)
             supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
             _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
@@ -582,6 +599,9 @@ class OPFUnrolled(pl.LightningModule):
                 + constraint_loss
             )
             loss = - opf_lagrangian.mean()
+            self.log(f"{self.mode}/val/loss/opf_cost", 
+                        cost.mean(),
+                        batch_size=batch.data.num_graphs, sync_dist=True)
         elif self.mode == 'critic':
             loss = opf_lagrangian.mean()
             
@@ -601,7 +621,11 @@ class OPFUnrolled(pl.LightningModule):
             for name, value in opf_constraints.items():
                 self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/val/constraints/mean/{name}", value['violation_mean'].mean(),
+                self.log(f"{self.mode}/val/constraints/total/{name}", value['violation_mean'].mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/val/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/val/constraints/rate/{name}", value['rate'],
                     batch_size=batch.data.num_graphs, sync_dist=True)
 
 

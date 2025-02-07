@@ -12,6 +12,7 @@ def metrics(loss, u: torch.Tensor, eps: float, multiplier: torch.Tensor | None):
         violation_mean=violated.abs().sum(dim=1),
         violation_max=violated.abs().max(dim=1),
         violation_min=violated.abs().min(dim=1),
+        nConstraints=u.shape[-1]
     )
     if loss is not None:
         metrics["loss"] = loss

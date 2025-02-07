@@ -57,9 +57,9 @@ def main():
     group = parser.add_argument_group("Trainer")
     group.add_argument("--no_gpu", action="store_false", dest="gpu")
     group.add_argument("--max_epochs_pd", type=int, default=300)
-    group.add_argument("--max_epochs_critic", type=int, default=1)
+    group.add_argument("--max_epochs_critic", type=int, default=5)
     group.add_argument("--max_epochs_actor", type=int, default=1)
-    group.add_argument("--patience", type=int, default=50)
+    group.add_argument("--patience", type=int, default=0)
     group.add_argument("--gradient_clip_val", type=float, default=0)
     
     params = parser.parse_args()
@@ -138,7 +138,7 @@ def make_trainer(params, mode, callbacks=[], wandb_kwargs={}):
         callbacks=callbacks,
         precision=32,
         accelerator="cuda" if params["gpu"] else "cpu",
-        devices=[1],
+        devices=1,
         max_epochs=params[f"max_epochs_{mode}"],
         default_root_dir=params["log_dir"],
         fast_dev_run=params["fast_dev_run"],
@@ -346,6 +346,7 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
         # n_layers_critic=trial.suggest_int("n_layers_critic", 3, 10),
         n_layers_actor=trial.suggest_int("n_layers_actor", 4, 10),
         n_sub_layer_actor=trial.suggest_int("n_sub_layer_actor", 1, 3),
+        noise_std = trial.suggest_float("noise_std", 0.01, 0.3),
 
     )
     params = {**default_params, **params}
