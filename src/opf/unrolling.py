@@ -115,7 +115,7 @@ class OPFUnrolled(pl.LightningModule):
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
         group.add_argument("--constraint_eps", type=float, default=0.1)
-        group.add_argument("--exploration_rate", type=float, default=0.3)
+        group.add_argument("--exploration_rate", type=float, default=0.4)
         group.add_argument("--lr_critic", type=float, default=2.96e-4)
         group.add_argument("--lr_actor", type=float, default=1e-5)
         group.add_argument("--weight_decay", type=float, default=0.0)
@@ -251,7 +251,7 @@ class OPFUnrolled(pl.LightningModule):
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
                         self.multiplier_table[name] += value.detach().cpu() + rho * torch.rand_like(value.detach().cpu())
-                        indices = torch.randperm(len(value))[:10]
+                        indices = torch.randperm(len(value))[:2]
                         self.longterm_multiplier_table[name] += value[indices].detach().cpu()
                     # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
                     #     self.multiplier_table[name] = self.multiplier_table[name][-self.multiplier_table_length :]
@@ -260,7 +260,7 @@ class OPFUnrolled(pl.LightningModule):
                         self.log(f"{layer}/multipliers_dataset/{name}/var", value.detach().cpu().var().sqrt())
                 
     
-    def _generate_exploitation_dataset(self, multipliers: list[torch.Tensor], n_samples: int):
+    def _generate_exploitation_dataset(self, multipliers: list[torch.Tensor], n_samples: int, longterm_multipliers: list[torch.Tensor]=None):
         """
         Generate the exploitation dataset from the multipliers.
         """
@@ -270,10 +270,12 @@ class OPFUnrolled(pl.LightningModule):
             if value == []:
                 self.exploitation_dataset[name] = []
             else:
-                if n_samples > len(value):
-                    n_samples = len(value)
+                # if n_samples > len(value):
+                #     n_samples = len(value)
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
+                if longterm_multipliers is not None:
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name][-10000:], torch.stack(longterm_multipliers[name])])
 
 
     def forward(

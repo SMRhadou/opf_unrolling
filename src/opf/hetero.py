@@ -579,7 +579,7 @@ class critic_heteroSage(HeteroSage):
             help="Number of hidden features on each layer.",
         )
         group.add_argument(
-            "--n_layers_critic", type=int, default=5, help="Number of GNN layers."
+            "--n_layers_critic", type=int, default=3, help="Number of GNN layers."
         )
         group.add_argument(
             "--mlp_read_layers",
@@ -798,7 +798,7 @@ class actor_heteroSage(HeteroSage):
         #     help="Number of hidden features on each layer.",
         # )
         group.add_argument(
-            "--n_layers_actor", type=int, default=4, help="Number of GNN layers."
+            "--n_layers_actor", type=int, default=8, help="Number of GNN layers."
         )
         group.add_argument(
             "--n_sub_layer_actor", type=int, default=3, help="Number of sub layers in each actor layer."

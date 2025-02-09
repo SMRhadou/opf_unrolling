@@ -57,7 +57,7 @@ def main():
     group = parser.add_argument_group("Trainer")
     group.add_argument("--no_gpu", action="store_false", dest="gpu")
     group.add_argument("--max_epochs_pd", type=int, default=300)
-    group.add_argument("--max_epochs_critic", type=int, default=5)
+    group.add_argument("--max_epochs_critic", type=int, default=1)
     group.add_argument("--max_epochs_actor", type=int, default=1)
     group.add_argument("--patience", type=int, default=0)
     group.add_argument("--gradient_clip_val", type=float, default=0)
@@ -252,7 +252,7 @@ def _train(trainer: Trainer, params):
                 else:
 
                     # critic_trainer = make_trainer(params, "critic", callbacks=[])
-                    critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000)
+                    critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000, longterm_multipliers=actor_model.longterm_multiplier_table)
                     critic_trainer.fit(critic_model, dm)
                     checkpoint = f'logs/checkpoints/actor-critic/{critic_trainer.logger.experiment.id}/best_critic.ckpt'
                     # critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)
