@@ -212,17 +212,22 @@ class OPFUnrolled(pl.LightningModule):
             self.multiplier_metadata.items(),
         ):
             if hasattr(self, 'exploitation_dataset') and self.exploitation_dataset[name] != []:
+                # assert self.mode == 'critic'
+                # exploitation_indices = torch.randperm(self.exploitation_dataset[name].numel())
+                # view_shape = (idx.shape[0],) + shape
+                # exploration_ex_view = exploration_ex.view(-1, *([1] * len(shape)))
+                # multiplier_dict[name] = (
+                #     data.view(view_shape) * exploration_ex_view
+                #     + (self.exploitation_dataset[name].view(-1)[exploitation_indices].view(self.exploitation_dataset[name].shape))[:idx.shape[0]].to(self.device) * ~exploration_ex_view
+                # )
                 assert self.mode == 'critic'
-                exploitation_indices = torch.randperm(self.exploitation_dataset[name].numel())
-                view_shape = (idx.shape[0],) + shape
+                exploitation_indices = torch.randperm(self.exploitation_dataset[name].shape[0])[:idx.shape[0]]
                 exploration_ex_view = exploration_ex.view(-1, *([1] * len(shape)))
-                multiplier_dict[name] = (
-                    data.view(view_shape) * exploration_ex_view
-                    + (self.exploitation_dataset[name].view(-1)[exploitation_indices].view(self.exploitation_dataset[name].shape))[:idx.shape[0]].to(self.device) * ~exploration_ex_view
-                )
+                exploitation_data = self.exploitation_dataset[name][exploitation_indices].to(self.device)
+                exploitation_data = exploitation_data.view(-1)[torch.randperm(exploitation_data.numel())].view(exploitation_data.shape)
+                multiplier_dict[name] = torch.where(exploration_ex_view, data.view((idx.shape[0],) + shape), exploitation_data)
             else:
-                multiplier_dict[name] = data.view((idx.shape[0],) + shape)
-                
+                multiplier_dict[name] = data.view((idx.shape[0],) + shape)            
         return multiplier_dict           
 
     def project_training_multipliers_common(self):
@@ -275,7 +280,7 @@ class OPFUnrolled(pl.LightningModule):
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-20000:])])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-10000:])])
 
 
     def forward(
