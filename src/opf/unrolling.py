@@ -63,7 +63,7 @@ class OPFUnrolled(pl.LightningModule):
         exploration_rate=0.4,
         enforce_constraints=False,
         detailed_metrics=False,
-        multiplier_table_length=200000,
+        multiplier_table_length=5000,
         cost_weight=1.0,
         aux_model: torch.nn.Module = None,  # only if mode == actor
         augmented_weight: float = 0.0,
@@ -127,7 +127,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--enforce_constraints", action="store_true", default=False)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
-        group.add_argument("--augmented_weight", type=float, default=0.54)
+        group.add_argument("--augmented_weight", type=float, default=0.9)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
         group.add_argument("--noise_std", type=float, default=0.5)
@@ -275,7 +275,7 @@ class OPFUnrolled(pl.LightningModule):
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name][-10000:], torch.stack(longterm_multipliers[name])])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-20000:])])
 
 
     def forward(
@@ -632,36 +632,111 @@ class OPFUnrolled(pl.LightningModule):
 
 
     def test_step(self, batch: PowerflowBatch, *args):
-        # TODO
-        # change to make faster
-        # project_powermodels taking too long
-        # go over batch w/ project pm, then individual steps without
-        multipliers = self.get_multipliers(batch.index)
-        _, constraints, cost = self._step_helper(
-            self(batch, multipliers),
-            batch.powerflow_parameters,
-            project_powermodels=True,
-        )
-        test_metrics = self.metrics(cost, constraints, "test", self.detailed_metrics)
-        self.log_dict(
-            test_metrics,
-            batch_size=batch.data.num_graphs,
-            sync_dist=True,
-        )
-        # TODO: rethink how to do comparison against ACOPF
-        # Test the ACOPF solution for reference.
-        # acopf_bus = self.bus_from_polar(acopf_bus)
-        # _, constraints, cost, _ = self._step_helper(
-        #     *self.parse_bus(acopf_bus),
-        #     self.parse_load(load),
-        #     project_pandapower=False,
+        batch_size = batch.data.num_graphs
+        multipliers = self.get_rand_multipliers(batch.index)
+        layer_predictions, multipliers_predictions = self(batch, multipliers)
+
+        constraint_layers = OrderedDict()
+        for layer, (variables, Sf_pred, St_pred) in layer_predictions.items():
+            if self.mode == 'critic':
+                _, constraints, cost = self._step_helper(
+                    variables, batch.powerflow_parameters, multipliers, output_tensors=True
+                )   # Evaluate the OPF objective and Constraints
+                constraint_loss = self.constraint_loss(constraints)
+
+                powerflow_loss = self.powerflow_loss(batch, variables, Sf_pred, St_pred)
+                opf_lagrangian = (
+                    self.cost_weight * cost / batch.powerflow_parameters.n_gen
+                    + constraint_loss
+                    + self.powerflow_weight * powerflow_loss
+                )
+                self.log(f"{self.mode}/val/{layer}/opf_lagrangian", opf_lagrangian.mean(),
+                        batch_size=batch.data.num_graphs, sync_dist=True)
+                constraint_layers[layer] = opf_lagrangian
+            elif self.mode == 'actor':
+                _, constraints, cost = self._step_helper(
+                    variables, batch.powerflow_parameters, output_tensors=False
+                )   # Evaluate the OPF objective and Constraints
+                opf_violation_loss = self.constraint_loss(constraints)
+                self.log(f"{self.mode}/val/{layer}/opf_violation_loss", opf_violation_loss.mean(),
+                        batch_size=batch.data.num_graphs, sync_dist=True)
+                constraint_layers[layer] = opf_violation_loss
+        val_constraints_loss = self.training_constraints(constraint_layers, train=False)
+        
+        # Training objective (+/- lagrangian at the last layer)
+        if self.mode == 'actor':
+            multipliers = multipliers_predictions[layer]
+            opf_constraints, cost = self.constraints(variables, batch.powerflow_parameters, multipliers)
+            supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
+            _, constraints, cost = self._step_helper(
+                    variables, batch.powerflow_parameters, multipliers, output_tensors=True
+                )   # Evaluate the OPF objective and Constraints
+            constraint_loss = self.constraint_loss(constraints)
+            opf_lagrangian = (
+                self.cost_weight * cost / batch.powerflow_parameters.n_gen
+                + constraint_loss
+            )
+            loss = - opf_lagrangian.mean()
+            self.log(f"{self.mode}/val/loss/opf_cost", 
+                        cost.mean(),
+                        batch_size=batch.data.num_graphs, sync_dist=True)
+        elif self.mode == 'critic':
+            loss = opf_lagrangian.mean()
+            
+        loss = loss + val_constraints_loss
+        self.log(f"{self.mode}/val/loss", loss,
+            batch_size=batch_size, sync_dist=True)
+        self.log(f"{self.mode}/val/constraints", val_constraints_loss,
+            batch_size=batch_size, sync_dist=True)
+    
+        # if loss < self.best_val:
+        #     self.best_val = loss
+        #     self.log(f"{self.mode}/val/best_loss", self.best_val,
+        #         batch_size=batch_size, sync_dist=True)
+        if self.mode == 'actor':
+            self.log(f"{self.mode}/val/loss/supervised", supervised_loss,
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            for name, value in opf_constraints.items():
+                self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/val/constraints/total/{name}", value['violation_mean'].mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/val/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                self.log(f"{self.mode}/val/constraints/rate/{name}", value['rate'],
+                    batch_size=batch.data.num_graphs, sync_dist=True)
+                
+                
+        # # TODO
+        # # change to make faster
+        # # project_powermodels taking too long
+        # # go over batch w/ project pm, then individual steps without
+        # multipliers = self.get_multipliers(batch.index)
+        # _, constraints, cost = self._step_helper(
+        #     self(batch, multipliers),
+        #     batch.powerflow_parameters,
+        #     project_powermodels=True,
         # )
-        # acopf_metrics = self.metrics(
-        #     cost, constraints, "acopf", self.detailed_metrics
+        # test_metrics = self.metrics(cost, constraints, "test", self.detailed_metrics)
+        # self.log_dict(
+        #     test_metrics,
+        #     batch_size=batch.data.num_graphs,
+        #     sync_dist=True,
         # )
-        # self.log_dict(acopf_metrics)
-        # return dict(**test_metrics, **acopf_metrics)
-        return test_metrics
+        # # TODO: rethink how to do comparison against ACOPF
+        # # Test the ACOPF solution for reference.
+        # # acopf_bus = self.bus_from_polar(acopf_bus)
+        # # _, constraints, cost, _ = self._step_helper(
+        # #     *self.parse_bus(acopf_bus),
+        # #     self.parse_load(load),
+        # #     project_pandapower=False,
+        # # )
+        # # acopf_metrics = self.metrics(
+        # #     cost, constraints, "acopf", self.detailed_metrics
+        # # )
+        # # self.log_dict(acopf_metrics)
+        # # return dict(**test_metrics, **acopf_metrics)
+        # return test_metrics
 
     def project_powermodels(
         self,

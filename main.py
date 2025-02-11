@@ -120,18 +120,19 @@ def make_trainer(params, mode, callbacks=[], wandb_kwargs={}):
         )
 
         # logger specific callbacks
-        callbacks += [
-            ModelCheckpoint(
-                monitor=f"{mode}/val/loss" if params["solver"] == "unrolling" else "pd/val/invariant",
-                dirpath=(Path(params["log_dir"]) / "checkpoints" / params["mode"] / Path(logger.experiment.id) if params["mode"] == "actor-critic" 
-                        else Path(params["log_dir"]) / "checkpoints" / Path(mode) / Path(logger.experiment.id)
-                        ),
-                filename=f"best_{mode}",
-                auto_insert_metric_name=False,
-                mode="min",
-                save_top_k=1,
-            )
-        ]
+        if mode == 'actor' or params["solver"] != "unrolling":
+            callbacks += [
+                ModelCheckpoint(
+                    monitor=f"{mode}/val/loss" if params["solver"] == "unrolling" else "pd/val/invariant",
+                    dirpath=(Path(params["log_dir"]) / "checkpoints" / params["mode"] / Path(logger.experiment.id) if params["mode"] == "actor-critic" 
+                            else Path(params["log_dir"]) / "checkpoints" / Path(mode) / Path(logger.experiment.id)
+                            ),
+                    filename=f"best_{mode}",
+                    auto_insert_metric_name=False,
+                    mode="min",
+                    save_top_k=1,
+                )
+            ]
     # callbacks += [EarlyStopping(monitor=f"{mode}/val/loss", patience=params["patience"])]
     trainer = Trainer(
         logger=logger,
@@ -239,38 +240,29 @@ def _train(trainer: Trainer, params):
                 multiplier_table_length=int(50000), mode='actor',
                 **{k: v for k, v in params.items() if k != 'mode'})
 
-            best_critic_loss = torch.inf
             best_actor_loss = torch.inf
             for cycle in range(params['num_cycles']):
                 print("cycle no.:", cycle)
-                if False: #cycle == 0:
-                    checkpoint = f'logs/checkpoints/critic/gl8empy9/best_critic.ckpt' # Lmax = 15
-                    # checkpoint = f'logs/checkpoints/critic/dquclwsa/best_critic.ckpt' # trained again
-                    critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)
-                    checkpoint = f'logs/checkpoints/actor-critic/dquclwsa/best_actor.ckpt'
-                    actor_model.model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_actor, strict=False)
-                else:
+                # critic_trainer = make_trainer(params, "critic", callbacks=[])
+                critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000, longterm_multipliers=actor_model.longterm_multiplier_table)
+                critic_trainer.fit(critic_model, dm)
+                checkpoint = f'logs/checkpoints/actor-critic/{critic_trainer.logger.experiment.id}/best_critic.ckpt'
+                # critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)
+                # if critic_trainer.callbacks[2].kth_value < best_critic_loss:
+                #     best_critic_loss = critic_trainer.callbacks[2].kth_value
+                reset_trainer(critic_trainer)
 
-                    # critic_trainer = make_trainer(params, "critic", callbacks=[])
-                    critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000, longterm_multipliers=actor_model.longterm_multiplier_table)
-                    critic_trainer.fit(critic_model, dm)
-                    checkpoint = f'logs/checkpoints/actor-critic/{critic_trainer.logger.experiment.id}/best_critic.ckpt'
-                    # critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)
-                    # if critic_trainer.callbacks[2].kth_value < best_critic_loss:
-                    #     best_critic_loss = critic_trainer.callbacks[2].kth_value
-                    reset_trainer(critic_trainer)
+                actor_model.aux_model = copy.deepcopy(critic_model.model).eval()
+                actor_trainer.fit(actor_model, dm)
+                checkpoint = f'logs/checkpoints/actor-critic/{actor_trainer.logger.experiment.id}/best_actor.ckpt'
+                # actor_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_actor, strict=False)
+                # if actor_trainer.callbacks[2].kth_value < best_actor_loss:
+                #     best_actor_loss = actor_trainer.callbacks[2].kth_value
+                reset_trainer(actor_trainer)
 
-                    actor_model.aux_model = copy.deepcopy(critic_model.model).eval()
-                    actor_trainer.fit(actor_model, dm)
-                    checkpoint = f'logs/checkpoints/actor-critic/{actor_trainer.logger.experiment.id}/best_actor.ckpt'
-                    # actor_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_actor, strict=False)
-                    # if actor_trainer.callbacks[2].kth_value < best_actor_loss:
-                    #     best_actor_loss = actor_trainer.callbacks[2].kth_value
-                    reset_trainer(actor_trainer)
-
-                    # logging best losses
-                    # critic_trainer.logger.log_metrics({'best_critic_loss': best_critic_loss})
-                    actor_trainer.logger.log_metrics({'best_actor_loss': best_actor_loss})
+                # logging best losses
+                # critic_trainer.logger.log_metrics({'best_critic_loss': best_critic_loss})
+                actor_trainer.logger.log_metrics({'best_actor_loss': best_actor_loss})
 
     elif solver == 'pd':
         model = OPFDual(
