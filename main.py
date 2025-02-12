@@ -139,7 +139,7 @@ def make_trainer(params, mode, callbacks=[], wandb_kwargs={}):
         callbacks=callbacks,
         precision=32,
         accelerator="cuda" if params["gpu"] else "cpu",
-        devices=1,
+        devices=[1],
         max_epochs=params[f"max_epochs_{mode}"],
         default_root_dir=params["log_dir"],
         fast_dev_run=params["fast_dev_run"],

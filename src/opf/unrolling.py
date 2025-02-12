@@ -124,7 +124,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--lr_common_actor", type=float, default=1e-3)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
-        group.add_argument("--enforce_constraints", action="store_true", default=False)
+        group.add_argument("--enforce_constraints", action="store_true", default=True)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
         group.add_argument("--augmented_weight", type=float, default=0.9)
@@ -280,7 +280,7 @@ class OPFUnrolled(pl.LightningModule):
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-10000:])])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-20000:])])
 
 
     def forward(
@@ -351,10 +351,10 @@ class OPFUnrolled(pl.LightningModule):
             raise ValueError(f"Unknown strategy: {strategy}")
         vm = fn(V.abs(), params.vm_min, params.vm_max)
         V = torch.polar(vm, V.angle())
-        Sg = torch.complex(
-            fn(Sg.real, params.Sg_min.real, params.Sg_max.real),
-            fn(Sg.imag, params.Sg_min.imag, params.Sg_max.imag),
-        )
+        # Sg = torch.complex(
+        #     fn(Sg.real, params.Sg_min.real, params.Sg_max.real),
+        #     fn(Sg.imag, params.Sg_min.imag, params.Sg_max.imag),
+        # )
         return V, Sg
 
     def supervised_loss(
@@ -381,8 +381,8 @@ class OPFUnrolled(pl.LightningModule):
 
         loss_voltage = (variables.V - V_target).abs().pow(2).mean()
         loss_gen = (variables.Sg - Sg_target).abs().pow(2).mean()
-        loss_sf = (Sf_pred - Sf_target).abs().pow(2).mean()
-        loss_st = (St_pred - St_target).abs().pow(2).mean()
+        loss_sf = (variables.Sf - Sf_target).abs().pow(2).mean()
+        loss_st = (variables.St - St_target).abs().pow(2).mean()
         loss_power = loss_sf + loss_st
         loss_supervised = loss_voltage + loss_gen + loss_power
         self.log_dict(
@@ -655,7 +655,7 @@ class OPFUnrolled(pl.LightningModule):
                     + constraint_loss
                     + self.powerflow_weight * powerflow_loss
                 )
-                self.log(f"{self.mode}/val/{layer}/opf_lagrangian", opf_lagrangian.mean(),
+                self.log(f"{self.mode}/test/{layer}/opf_lagrangian", opf_lagrangian.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
                 constraint_layers[layer] = opf_lagrangian
             elif self.mode == 'actor':
@@ -663,7 +663,7 @@ class OPFUnrolled(pl.LightningModule):
                     variables, batch.powerflow_parameters, output_tensors=False
                 )   # Evaluate the OPF objective and Constraints
                 opf_violation_loss = self.constraint_loss(constraints)
-                self.log(f"{self.mode}/val/{layer}/opf_violation_loss", opf_violation_loss.mean(),
+                self.log(f"{self.mode}/test/{layer}/opf_violation_loss", opf_violation_loss.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
                 constraint_layers[layer] = opf_violation_loss
         val_constraints_loss = self.training_constraints(constraint_layers, train=False)
@@ -682,34 +682,31 @@ class OPFUnrolled(pl.LightningModule):
                 + constraint_loss
             )
             loss = - opf_lagrangian.mean()
-            self.log(f"{self.mode}/val/loss/opf_cost", 
+            self.log(f"{self.mode}/test/loss/opf_cost", 
                         cost.mean(),
                         batch_size=batch.data.num_graphs, sync_dist=True)
         elif self.mode == 'critic':
             loss = opf_lagrangian.mean()
             
         loss = loss + val_constraints_loss
-        self.log(f"{self.mode}/val/loss", loss,
+        self.log(f"{self.mode}/test/loss", loss,
             batch_size=batch_size, sync_dist=True)
-        self.log(f"{self.mode}/val/constraints", val_constraints_loss,
+        self.log(f"{self.mode}/test/constraints", val_constraints_loss,
             batch_size=batch_size, sync_dist=True)
     
-        # if loss < self.best_val:
-        #     self.best_val = loss
-        #     self.log(f"{self.mode}/val/best_loss", self.best_val,
-        #         batch_size=batch_size, sync_dist=True)
         if self.mode == 'actor':
-            self.log(f"{self.mode}/val/loss/supervised", supervised_loss,
+            self.log(f"{self.mode}/test/loss/supervised", supervised_loss,
                 batch_size=batch.data.num_graphs, sync_dist=True)
             for name, value in opf_constraints.items():
-                self.log(f"{self.mode}/val/constraints/max/{name}", value['violation_max'][0].mean(),
+                self.log(f"{self.mode}/test/constraints/max/{name}", value['violation_max'][0].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/val/constraints/total/{name}", value['violation_mean'].mean(),
+                self.log(f"{self.mode}/test/constraints/total/{name}", value['violation_mean'].mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/val/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
+                self.log(f"{self.mode}/test/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
                     batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/val/constraints/rate/{name}", value['rate'],
+                self.log(f"{self.mode}/test/constraints/rate/{name}", value['rate'],
                     batch_size=batch.data.num_graphs, sync_dist=True)
+        return loss
                 
                 
         # # TODO
