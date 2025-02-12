@@ -39,6 +39,11 @@ def main():
     parser.add_argument(
         "--no_personalize", action="store_false", dest="personalize", default=True
     )   # 
+
+    # Constraints arguments
+    parser.add_argument("--enforce_bus_reference", action="store_true", default=True)
+    parser.add_argument("--enforce_Vconstraints", action="store_true", default=True)
+    parser.add_argument("--enforce_Sg_constraints", action="store_true", default=True)
     
     # Solver arguments
     parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="unrolling")
@@ -139,7 +144,7 @@ def make_trainer(params, mode, callbacks=[], wandb_kwargs={}):
         callbacks=callbacks,
         precision=32,
         accelerator="cuda" if params["gpu"] else "cpu",
-        devices=[1],
+        devices=1,
         max_epochs=params[f"max_epochs_{mode}"],
         default_root_dir=params["log_dir"],
         fast_dev_run=params["fast_dev_run"],
@@ -244,7 +249,7 @@ def _train(trainer: Trainer, params):
             for cycle in range(params['num_cycles']):
                 print("cycle no.:", cycle)
                 # critic_trainer = make_trainer(params, "critic", callbacks=[])
-                critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=50000, longterm_multipliers=actor_model.longterm_multiplier_table)
+                critic_model._generate_exploitation_dataset(actor_model.multiplier_table, n_samples=60000, longterm_multipliers=actor_model.longterm_multiplier_table)
                 critic_trainer.fit(critic_model, dm)
                 checkpoint = f'logs/checkpoints/actor-critic/{critic_trainer.logger.experiment.id}/best_critic.ckpt'
                 # critic_model = OPFUnrolled.load_from_checkpoint(checkpoint, model=gcn_critic)

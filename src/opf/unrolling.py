@@ -61,7 +61,9 @@ class OPFUnrolled(pl.LightningModule):
         eps=1e-3,
         constraint_eps = 0.05,
         exploration_rate=0.4,
-        enforce_constraints=False,
+        enforce_Vconstraints=False,
+        enforce_Sg_constraints=False,
+        enforce_bus_reference=False,
         detailed_metrics=False,
         multiplier_table_length=5000,
         cost_weight=1.0,
@@ -90,7 +92,10 @@ class OPFUnrolled(pl.LightningModule):
         self.eps = eps
         self.constraint_eps = constraint_eps if self.mode == 'actor' else 0.0
         self.exploration_rate = exploration_rate
-        self._enforce_constraints = enforce_constraints
+        self._enforce_Vconstraints = enforce_Vconstraints
+        self._enforce_Sg_constraints = enforce_Sg_constraints
+        self._enforce_bus_reference = enforce_bus_reference
+        self._enforce_constraints = enforce_Vconstraints or enforce_Sg_constraints or enforce_bus_reference
         self.detailed_metrics = detailed_metrics
         self.automatic_optimization = False
         self.multiplier_table_length = multiplier_table_length
@@ -124,7 +129,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--lr_common_actor", type=float, default=1e-3)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
-        group.add_argument("--enforce_constraints", action="store_true", default=True)
+        # group.add_argument("--enforce_constraints", action="store_true", default=True)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
         group.add_argument("--augmented_weight", type=float, default=0.9)
@@ -349,12 +354,14 @@ class OPFUnrolled(pl.LightningModule):
             fn = lambda x, lb, ub: torch.clamp(x, lb, ub)
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
-        vm = fn(V.abs(), params.vm_min, params.vm_max)
-        V = torch.polar(vm, V.angle())
-        # Sg = torch.complex(
-        #     fn(Sg.real, params.Sg_min.real, params.Sg_max.real),
-        #     fn(Sg.imag, params.Sg_min.imag, params.Sg_max.imag),
-        # )
+        vm = fn(V.abs(), params.vm_min, params.vm_max) if self._enforce_Vconstraints else V.abs()
+        va = (V.angle() - V.angle()[:,0:1]) if self._enforce_bus_reference else V.angle()
+        V = torch.polar(vm, va)
+        if self._enforce_Sg_constraints:
+            Sg = torch.complex(
+                fn(Sg.real, params.Sg_min.real, params.Sg_max.real),
+                fn(Sg.imag, params.Sg_min.imag, params.Sg_max.imag),
+            )
         return V, Sg
 
     def supervised_loss(
