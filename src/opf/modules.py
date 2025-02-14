@@ -92,6 +92,10 @@ class OPFDual(pl.LightningModule):
                     ("equality/bus_active_power", torch.Size([n_bus])),
                     ("equality/bus_reactive_power", torch.Size([n_bus])),
                     ("equality/bus_reference", torch.Size([n_bus])),
+                    ("equality/sf_active_power", torch.Size([n_branch])),
+                    ("equality/sf_reactive_power", torch.Size([n_branch])),
+                    ("equality/st_active_power", torch.Size([n_branch])),
+                    ("equality/st_reactive_power", torch.Size([n_branch])),
                     ("inequality/voltage_magnitude", torch.Size([n_bus, 2])),
                     ("inequality/active_power", torch.Size([n_gen, 2])),
                     ("inequality/reactive_power", torch.Size([n_gen, 2])),
@@ -235,7 +239,7 @@ class OPFDual(pl.LightningModule):
         Sf_pred, St_pred = self.parse_branch(branch)
         if self._enforce_constraints:
             V, Sg = self.enforce_constraints(V, Sg, powerflow_parameters)
-        return pf.powerflow(V, Sd, Sg, powerflow_parameters), Sf_pred, St_pred
+        return pf.powerflow(V, Sd, Sg, powerflow_parameters, Sf_pred, St_pred), Sf_pred, St_pred
 
     def enforce_constraints(
         self, V, Sg, params: pf.PowerflowParameters, strategy="sigmoid"
@@ -292,7 +296,7 @@ class OPFDual(pl.LightningModule):
         loss_sf = (Sf_pred - Sf_target).abs().pow(2).mean()
         loss_st = (St_pred - St_target).abs().pow(2).mean()
         loss_power = loss_sf + loss_st
-        loss_supervised = loss_voltage + loss_gen + loss_power
+        loss_supervised = loss_voltage + loss_gen #+ loss_power
         self.log_dict(
             {
                 "pd/train/supervised_voltage": loss_voltage,
@@ -409,7 +413,11 @@ class OPFDual(pl.LightningModule):
         for name, value in opf_constraints.items():
             self.log(f"pd/train/constraints/max/{name}", value['violation_max'][0].max(),
                 batch_size=batch.data.num_graphs, sync_dist=True)
-            self.log(f"pd/train/constraints/mean/{name}", value['violation_mean'].mean(),
+            self.log(f"pd/train/constraints/total/{name}", value['violation_mean'].mean(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            self.log(f"pd/train/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
+                batch_size=batch.data.num_graphs, sync_dist=True)
+            self.log(f"pd/train/constraints/rate/{name}", value['rate'],
                 batch_size=batch.data.num_graphs, sync_dist=True)
 
 
@@ -656,7 +664,9 @@ class OPFDual(pl.LightningModule):
                     aggregate_metrics[aggregate_name].append(value[0].max().reshape(1))
                 elif "min" in value_name and "multiplier" not in value_name:
                     aggregate_metrics[aggregate_name].append(value[0].min().reshape(1))
-                else:
+                elif "mean" in value_name and "multiplier" not in value_name:
+                    aggregate_metrics[aggregate_name].append((value/constraint_values['nConstraints']).mean().reshape(1))
+                elif "nConstraints" not in value_name:
                     aggregate_metrics[aggregate_name].append(value.mean().reshape(1))
 
         for aggregate_name in aggregate_metrics:

@@ -46,8 +46,8 @@ def main():
     parser.add_argument("--enforce_Sg_constraints", action="store_true", default=True)
     
     # Solver arguments
-    parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="unrolling")
-    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default="actor-critic")
+    parser.add_argument("--solver", type=str, choices=["unrolling", "pd"], default="pd")
+    parser.add_argument('--mode', type=str, choices=['critic', 'actor', 'actor-critic', None], default=None)
     parser.add_argument('--num_cycles', type=int, default=1000)
     
 

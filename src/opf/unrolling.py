@@ -126,7 +126,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
-        group.add_argument("--lr_common_actor", type=float, default=1e-3)
+        group.add_argument("--lr_common_actor", type=float, default=1e-4)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         # group.add_argument("--enforce_constraints", action="store_true", default=True)
@@ -135,7 +135,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--augmented_weight", type=float, default=0.9)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
-        group.add_argument("--noise_std", type=float, default=0.5)
+        group.add_argument("--noise_std", type=float, default=1)
         group.add_argument("--warmup", type=int, default=0)
         group.add_argument("--supervised_warmup", type=int, default=0)
         group.add_argument("--no_common", dest="common", action="store_false", default=False)
@@ -152,6 +152,10 @@ class OPFUnrolled(pl.LightningModule):
                     ("equality/bus_active_power", torch.Size([n_bus])),
                     ("equality/bus_reactive_power", torch.Size([n_bus])),
                     ("equality/bus_reference", torch.Size([n_bus])),
+                    ("equality/sf_active_power", torch.Size([n_branch])),
+                    ("equality/sf_reactive_power", torch.Size([n_branch])),
+                    ("equality/st_active_power", torch.Size([n_branch])),
+                    ("equality/st_reactive_power", torch.Size([n_branch])),
                     ("inequality/voltage_magnitude", torch.Size([n_bus, 2])),
                     ("inequality/active_power", torch.Size([n_gen, 2])),
                     ("inequality/reactive_power", torch.Size([n_gen, 2])),
@@ -255,12 +259,12 @@ class OPFUnrolled(pl.LightningModule):
             self.multipliers_common.data[self.multiplier_inequality_mask].relu_()
         )
 
-    def _update_multiplier_table(self, multipliers: Dict[str, Dict], rho=0.1):
+    def _update_multiplier_table(self, multipliers: Dict[str, Dict]):
         with torch.no_grad():
             for layer, multiplier_dict in multipliers.items():
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
-                        self.multiplier_table[name] += value.detach().cpu() + rho * torch.rand_like(value.detach().cpu())
+                        self.multiplier_table[name] += value.detach().cpu() + self.noise_std * torch.rand_like(value.detach().cpu())
                         indices = torch.randperm(len(value))[:2]
                         self.longterm_multiplier_table[name] += value[indices].detach().cpu()
                     # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
@@ -285,7 +289,9 @@ class OPFUnrolled(pl.LightningModule):
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-20000:])])
+                    longterm_exploitation = torch.stack(longterm_multipliers[name][-20000:])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], 
+                                                                longterm_exploitation  + self.noise_std * torch.rand_like(longterm_exploitation)])
 
 
     def forward(
@@ -322,7 +328,7 @@ class OPFUnrolled(pl.LightningModule):
                     Sf_pred, St_pred = self.parse_branch(branch)
                     if self._enforce_constraints:
                         V, Sg = self.enforce_constraints(V, Sg, powerflow_parameters)
-                    layer_outputs[layer] = (pf.powerflow(V, Sd, Sg, powerflow_parameters), Sf_pred, St_pred)
+                    layer_outputs[layer] = (pf.powerflow(V, Sd, Sg, powerflow_parameters, Sf_pred, St_pred), Sf_pred, St_pred)
                 return layer_outputs, m_outputs if self.mode == 'actor' else None
             else:
                 raise NotImplementedError("Unsupported model")
@@ -465,7 +471,7 @@ class OPFUnrolled(pl.LightningModule):
         multipliers = self.get_rand_multipliers(batch.index)
         layer_predictions, multipliers_predictions = self(batch, multipliers)
         if self.mode == 'actor' and self.update_common_multipliers and self.current_epoch >= 0:
-            self._update_multiplier_table(multipliers_predictions, self.noise_std)
+            self._update_multiplier_table(multipliers_predictions)
 
         # evaluate training descending constraints
         constraint_layers = OrderedDict()

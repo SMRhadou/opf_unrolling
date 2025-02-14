@@ -294,15 +294,55 @@ def build_constraints(d: PowerflowVariables, p: PowerflowParameters):
             isBus=True,
             isAngle=False,
             augmented=True,
-            value=d.S.real,
-            target=d.Sg_bus.real - d.Sd.real,
+            value=d.Sg_bus.real - d.S.real,
+            target=d.Sd.real,
         ),
         "equality/bus_reactive_power": EqualityConstraint(
             isBus=True,
             isAngle=False,
             augmented=True,
-            value=d.S.imag,
-            target=d.Sg_bus.imag - d.Sd.imag,
+            value=d.Sg_bus.imag - d.S.imag,
+            target=d.Sd.imag,
+            mask=None,
+        ),
+        "equality/sf_active_power": EqualityConstraint(
+            isBus=True,
+            isAngle=False,
+            augmented=True,
+            value=d.Sf.real,
+            target=((d.V[..., p.fr_bus]/ p.ratio) * (p.Y + p.Yc_fr).conj() * (d.V[..., p.fr_bus]/ p.ratio).conj() - 
+                        p.Y.conj() * (d.V[..., p.fr_bus]/ p.ratio)  * d.V[..., p.to_bus].conj()
+                    ).real,
+            mask=None,
+        ),
+        "equality/sf_reactive_power": EqualityConstraint(
+            isBus=True,
+            isAngle=False,
+            augmented=True,
+            value=d.Sf.imag,
+            target=((d.V[..., p.fr_bus]/ p.ratio) * (p.Y + p.Yc_fr).conj() * (d.V[..., p.fr_bus]/ p.ratio).conj() - 
+                        p.Y.conj() * (d.V[..., p.fr_bus]/ p.ratio)  * d.V[..., p.to_bus].conj()
+                    ).imag,
+            mask=None,
+        ),
+        "equality/st_active_power": EqualityConstraint(
+            isBus=True,
+            isAngle=False,
+            augmented=True,
+            value=d.St.real,
+            target=((d.V[..., p.fr_bus]/ p.ratio) * (p.Y + p.Yc_fr).conj() * (d.V[..., p.fr_bus]/ p.ratio).conj() - 
+                        p.Y.conj() * (d.V[..., p.fr_bus]/ p.ratio)  * d.V[..., p.to_bus].conj()
+                    ).real,
+            mask=None,
+        ),
+        "equality/st_reactive_power": EqualityConstraint(
+            isBus=True,
+            isAngle=False,
+            augmented=True,
+            value=d.St.imag,
+            target=(d.V[..., p.to_bus] * (p.Y + p.Yc_to).conj() * d.V[..., p.to_bus].conj() - 
+                        p.Y.conj() * (d.V[..., p.fr_bus]/ p.ratio).conj()  * d.V[..., p.to_bus]
+                    ).imag,
             mask=None,
         ),
         "equality/bus_reference": EqualityConstraint(
@@ -484,6 +524,8 @@ def powerflow(
     Sd: torch.Tensor,
     Sg: torch.Tensor,
     params: PowerflowParameters,
+    Sf: torch.Tensor | None = None,
+    St: torch.Tensor | None = None,
 ) -> PowerflowVariables:
     """
     Given the bus voltage and load, find all the other problem variables.
@@ -493,16 +535,17 @@ def powerflow(
         https://lanl-ansi.github.io/PowerModels.jl/stable/math-model/
         https://matpower.org/docs/MATPOWER-manual.pdf
     """
-    Vf = V[..., params.fr_bus]
-    Vt = V[..., params.to_bus]
-    # voltage after transformer
-    Vf_trafo = Vf / params.ratio
-    Sf = Vf_trafo * (params.Y + params.Yc_fr).conj() * Vf_trafo.conj() - (
-        params.Y.conj() * Vf_trafo * Vt.conj()
-    )
-    St = Vt * (params.Y + params.Yc_to).conj() * Vt.conj() - (
-        params.Y.conj() * Vf_trafo.conj() * Vt
-    )
+    if Sf is None and St is None:
+        Vf = V[..., params.fr_bus]
+        Vt = V[..., params.to_bus]
+        # voltage after transformer
+        Vf_trafo = Vf / params.ratio
+        Sf = Vf_trafo * (params.Y + params.Yc_fr).conj() * Vf_trafo.conj() - (
+            params.Y.conj() * Vf_trafo * Vt.conj()
+        )
+        St = Vt * (params.Y + params.Yc_to).conj() * Vt.conj() - (
+            params.Y.conj() * Vf_trafo.conj() * Vt
+        )
     S_sh = V * params.Ybus_sh.conj() * V.conj()
     S_branch = torch.zeros_like(Sd)
     S_branch = S_branch.index_add(1, params.fr_bus, Sf)
