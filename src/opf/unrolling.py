@@ -255,12 +255,12 @@ class OPFUnrolled(pl.LightningModule):
             self.multipliers_common.data[self.multiplier_inequality_mask].relu_()
         )
 
-    def _update_multiplier_table(self, multipliers: Dict[str, Dict], rho=0.1):
+    def _update_multiplier_table(self, multipliers: Dict[str, Dict]):
         with torch.no_grad():
             for layer, multiplier_dict in multipliers.items():
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
-                        self.multiplier_table[name] += value.detach().cpu() + rho * torch.rand_like(value.detach().cpu())
+                        self.multiplier_table[name] += value.detach().cpu() + self.noise_std * torch.rand_like(value.detach().cpu())
                         indices = torch.randperm(len(value))[:2]
                         self.longterm_multiplier_table[name] += value[indices].detach().cpu()
                     # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
@@ -285,7 +285,9 @@ class OPFUnrolled(pl.LightningModule):
                 # randomly sample n_samples from the multipliers
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], torch.stack(longterm_multipliers[name][-20000:])])
+                    longterm_exploitation = torch.stack(longterm_multipliers[name][-20000:])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], 
+                                                                longterm_exploitation  + self.noise_std * torch.rand_like(longterm_exploitation)])
 
 
     def forward(
@@ -465,7 +467,7 @@ class OPFUnrolled(pl.LightningModule):
         multipliers = self.get_rand_multipliers(batch.index)
         layer_predictions, multipliers_predictions = self(batch, multipliers)
         if self.mode == 'actor' and self.update_common_multipliers and self.current_epoch >= 0:
-            self._update_multiplier_table(multipliers_predictions, self.noise_std)
+            self._update_multiplier_table(multipliers_predictions)
 
         # evaluate training descending constraints
         constraint_layers = OrderedDict()
