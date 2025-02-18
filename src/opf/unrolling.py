@@ -123,11 +123,11 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--exploration_rate", type=float, default=0.4)
         group.add_argument("--lr_critic", type=float, default=2.96e-4)
         group.add_argument("--lr_actor", type=float, default=1e-5)
-        group.add_argument("--weight_decay", type=float, default=0.0)
+        group.add_argument("--weight_decay", type=float, default=0.0001)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
-        group.add_argument("--lr_common_actor", type=float, default=1e-4)
-        group.add_argument("--weight_decay_dual", type=float, default=0.0)
+        group.add_argument("--lr_common_actor", type=float, default=1e-3)
+        group.add_argument("--weight_decay_dual", type=float, default=0.0001)
         group.add_argument("--eps", type=float, default=1e-3)
         # group.add_argument("--enforce_constraints", action="store_true", default=True)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
@@ -135,7 +135,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--augmented_weight", type=float, default=0.9)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
-        group.add_argument("--noise_std", type=float, default=0.5)
+        group.add_argument("--noise_std", type=float, default=1)
         group.add_argument("--warmup", type=int, default=0)
         group.add_argument("--supervised_warmup", type=int, default=0)
         group.add_argument("--no_common", dest="common", action="store_false", default=False)
@@ -315,7 +315,7 @@ class OPFUnrolled(pl.LightningModule):
                 for layer, y_dict in outputs.items():
                     # reshape data to size (batch_size, n_nodes_of_type, n_features)
                     load = data["bus"].x[:, :2].view(n_batch, powerflow_parameters.n_bus, 2)
-                    bus = y_dict["bus"].view(n_batch, powerflow_parameters.n_bus, 4)[..., :2]
+                    bus = y_dict["bus"].view(n_batch, powerflow_parameters.n_bus, 4)[..., 2:]
                     gen = y_dict["gen"].view(n_batch, powerflow_parameters.n_gen, 4)[..., :2]
                     branch = y_dict["branch"].view(n_batch, powerflow_parameters.n_branch, 4)
                     V = self.parse_bus(bus)
