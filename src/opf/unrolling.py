@@ -126,7 +126,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--weight_decay", type=float, default=0.0)
         group.add_argument("--lr_dual", type=float, default=0.1)
         group.add_argument("--lr_common_critic", type=float, default=1.12e-4)
-        group.add_argument("--lr_common_actor", type=float, default=1e-3)
+        group.add_argument("--lr_common_actor", type=float, default=1e-4)
         group.add_argument("--weight_decay_dual", type=float, default=0.0)
         group.add_argument("--eps", type=float, default=1e-3)
         # group.add_argument("--enforce_constraints", action="store_true", default=True)

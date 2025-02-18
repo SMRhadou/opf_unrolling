@@ -1,5 +1,6 @@
-import argparse
 import os
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
+import argparse
 import typing
 import copy
 from functools import partial
@@ -182,7 +183,7 @@ def _train(trainer: Trainer, params):
         gcn_critic = critic_heteroSage(
             dm.metadata(),
             x_channels=max(dm.feature_dims.values()),
-            lambda_channels=6,
+            lambda_channels=15,
             out_channels=4,
             **params,
         )
@@ -195,7 +196,7 @@ def _train(trainer: Trainer, params):
         gcn_actor = actor_heteroSage(
             dm.metadata(),
             x_channels=max(dm.feature_dims.values()),
-            lambda_channels=6,
+            lambda_channels=15,
             y_channels=4,
             **params,
         )
@@ -406,4 +407,5 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
 
 
 if __name__ == "__main__":
+
     main()

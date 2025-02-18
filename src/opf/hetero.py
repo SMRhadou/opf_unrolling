@@ -694,17 +694,39 @@ class critic_heteroSage(HeteroSage):
                     dropout=dropout,
                 )
             )
-        
+    
+    @staticmethod
+    def multiplier_allocation(type):
+        if type == 'equality/bus_active_power':
+            return 'bus', 0, 1
+        elif type == 'equality/bus_reactive_power':
+            return 'bus', 1,  2
+        elif type == 'equality/bus_reference':
+            return 'bus',  2,  3
+        elif type == 'inequality/voltage_magnitude':
+            return 'bus',  3,  5
+        elif type == 'inequality/active_power':
+            return 'gen',  5,  7
+        elif type == 'inequality/reactive_power':
+            return 'gen',  7,  9
+        elif type == 'inequality/forward_rate':
+            return 'branch',  9,  11
+        elif type == 'inequality/backward_rate':
+            return 'branch',  11,  13
+        elif type == 'inequality/voltage_angle_difference':
+            return 'branch',  13,  15
+
+
 
     def forward(self, x_dict, multipliers, edge_index_dict, t=None, raw=True):
-        # zero pad x_dict to x_channels size
+        # zero pad x_dict to x_channels + lambda_channels size
         x_dict = {
             node_type: torch.cat(
             [
                 x,
                 torch.zeros(
                 x.size(0),
-                self.x_channels - x.size(1),
+                self.x_channels + self.lambda_channels - x.size(1),
                 device=x.device,
                 dtype=x.dtype,
                 ),
@@ -722,21 +744,12 @@ class critic_heteroSage(HeteroSage):
                     m = m.reshape(-1, 1)
                 else:
                     m = m.reshape(-1, 2)
-                if 'bus' in type or 'voltage_magnitude' in type:
-                    start = x_dict['bus'].shape[-1] - self.x_channels
-                    x_dict['bus'] = torch.cat((x_dict['bus'], m), dim=1)
-                    multiplier_location[type] = ('bus', start, x_dict['bus'].shape[-1] - self.x_channels)
-                elif 'inequality' in type and 'power' in type:
-                    start = x_dict['gen'].shape[-1] - self.x_channels
-                    x_dict['gen'] = torch.cat((x_dict['gen'], m), dim=1)
-                    multiplier_location[type] = ('gen', start, x_dict['gen'].shape[-1] - self.x_channels)
-                elif 'rate' in type or 'angle' in type:
-                    start = x_dict['branch'].shape[-1] - self.x_channels
-                    x_dict['branch'] = torch.cat((x_dict['branch'], m), dim=1)
-                    multiplier_location[type] = ('branch', start, x_dict['branch'].shape[-1] - self.x_channels)
+                node_type, start, end = self.multiplier_allocation(type)
+                multiplier_location[type] = node_type, start, end
+                x_dict[node_type][:, start:end] = m
         else:
             x_dict = {
-                node_type: torch.cat([x_dict[node_type], m], dim=1)
+                node_type: torch.cat([x_dict[node_type][:,:self.x_channels], m], dim=1)
                 for node_type, m in multipliers.items()
             }
         
@@ -950,7 +963,9 @@ class actor_heteroSage(HeteroSage):
                 multipliers_location = location
             for type, m in multipliers_location.items():
                 if 'inequality' in type:
-                    multipliers[m[0]][:, m[1]:m[2]] = F.relu(multipliers[m[0]][:, m[1]:m[2]])
+                    multipliers['bus'][:, m[1]:m[2]] = F.relu(multipliers['bus'][:, m[1]:m[2]])
+                    multipliers['gen'][:, m[1]:m[2]] = F.relu(multipliers['gen'][:, m[1]:m[2]])
+                    multipliers['branch'][:, m[1]:m[2]] = F.relu(multipliers['branch'][:, m[1]:m[2]])
 
             # save outputs
             x_dict = {
