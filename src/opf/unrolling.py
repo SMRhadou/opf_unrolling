@@ -135,7 +135,7 @@ class OPFUnrolled(pl.LightningModule):
         group.add_argument("--augmented_weight", type=float, default=0.9)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
-        group.add_argument("--noise_std", type=float, default=1)
+        group.add_argument("--noise_std", type=float, default=0.1)
         group.add_argument("--warmup", type=int, default=0)
         group.add_argument("--supervised_warmup", type=int, default=0)
         group.add_argument("--no_common", dest="common", action="store_false", default=False)
@@ -260,7 +260,8 @@ class OPFUnrolled(pl.LightningModule):
             for layer, multiplier_dict in multipliers.items():
                 for name, value in multiplier_dict.items():
                     if name in self.multiplier_metadata:
-                        self.multiplier_table[name] += value.detach().cpu() + self.noise_std * torch.rand_like(value.detach().cpu())
+                        self.multiplier_table[name] += value.detach().cpu() #+ self.noise_std * torch.rand_like(value.detach().cpu())
+                        self.placeholder[name][layer] += value.detach().cpu()
                         indices = torch.randperm(len(value))[:2]
                         self.longterm_multiplier_table[name] += value[indices].detach().cpu()
                     # if self.forget and len(self.multiplier_table[name]) > self.multiplier_table_length:
@@ -283,11 +284,27 @@ class OPFUnrolled(pl.LightningModule):
                 # if n_samples > len(value):
                 #     n_samples = len(value)
                 # randomly sample n_samples from the multipliers
+                std = self.noise_std * torch.stack(multipliers[name]).std()
                 self.exploitation_dataset[name] = torch.stack([value[i] for i in indices])
                 if longterm_multipliers is not None:
                     longterm_exploitation = torch.stack(longterm_multipliers[name][-20000:])
-                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name], 
-                                                                longterm_exploitation  + self.noise_std * torch.rand_like(longterm_exploitation)])
+                    self.exploitation_dataset[name] = torch.cat([self.exploitation_dataset[name] + std * torch.rand_like(self.exploitation_dataset[name]), 
+                                                                longterm_exploitation  + std * torch.rand_like(longterm_exploitation)])
+
+
+    def plot_histogram(self, multipliers: Dict[str, torch.Tensor], n_bins: int = 100):
+        import matplotlib.pyplot as plt
+        num_cols = self.model.n_layers//2
+        fig1, ax1 = plt.subplots(2, num_cols, figsize=(10, 5))
+        fig2, ax2 = plt.subplots(2, num_cols, figsize=(10, 5))
+        for type, m in multipliers.items():
+            for layer, value in m.items():
+                if type == 'equality/bus_active_power' and self.current_epoch % 10 == 0:
+                    ax1[(int(layer)-1)//num_cols, (int(layer)-1)%num_cols].hist(torch.stack(value).cpu().numpy(), bins=n_bins, label=layer)
+                elif type == 'inequality/active_power' and self.current_epoch % 10 == 0:
+                    ax2[(int(layer)-1)//num_cols, (int(layer)-1)%num_cols].hist(torch.stack(value).reshape(-1,1).cpu().numpy(), bins=n_bins, label=layer)
+        fig1.savefig(f"./figs/bus_active_power_multipliers_histogram @ {self.current_epoch}.pdf")
+        fig2.savefig(f"./figs/active_power_multipliers_histogram @ {self.current_epoch}.pdf")
 
 
     def forward(
@@ -317,14 +334,14 @@ class OPFUnrolled(pl.LightningModule):
                     load = data["bus"].x[:, :2].view(n_batch, powerflow_parameters.n_bus, 2)
                     bus = y_dict["bus"].view(n_batch, powerflow_parameters.n_bus, 4)[..., 2:]
                     gen = y_dict["gen"].view(n_batch, powerflow_parameters.n_gen, 4)[..., :2]
-                    branch = y_dict["branch"].view(n_batch, powerflow_parameters.n_branch, 4)
+                    # branch = y_dict["branch"].view(n_batch, powerflow_parameters.n_branch, 4)
                     V = self.parse_bus(bus)
                     Sg = self.parse_gen(gen)
                     Sd = self.parse_load(load)
-                    Sf_pred, St_pred = self.parse_branch(branch)
+                    # Sf_pred, St_pred = self.parse_branch(branch)
                     if self._enforce_constraints:
                         V, Sg = self.enforce_constraints(V, Sg, powerflow_parameters)
-                    layer_outputs[layer] = (pf.powerflow(V, Sd, Sg, powerflow_parameters), Sf_pred, St_pred)
+                    layer_outputs[layer] = (pf.powerflow(V, Sd, Sg, powerflow_parameters))#, Sf_pred, St_pred)
                 return layer_outputs, m_outputs if self.mode == 'actor' else None
             else:
                 raise NotImplementedError("Unsupported model")
@@ -447,6 +464,12 @@ class OPFUnrolled(pl.LightningModule):
         self.multiplier_table = {
                 name: [] for name in self.multiplier_metadata.keys()
             }
+        if self.mode == 'actor':
+            self.placeholder = {
+                    name: { f'{i+1}': [] for i in range(self.model.n_layers)
+                    } 
+                    for name in self.multiplier_metadata.keys()
+                }
         # _, dual_optimizer, _ = self.optimizers()  # type: ignore
         # dual_optimizer.zero_grad()
         pass
@@ -459,6 +482,8 @@ class OPFUnrolled(pl.LightningModule):
         # if self.current_epoch >= self.warmup:
         #     dual_optimizer.step()                   # Dual Ascent Step
         #     self.project_multipliers_table()        # Ensure the inequality constraints are always positive
+        if self.mode == 'actor':
+            self.plot_histogram(self.placeholder)
         pass
 
     def training_step(self, batch: PowerflowBatch):
@@ -471,7 +496,8 @@ class OPFUnrolled(pl.LightningModule):
 
         # evaluate training descending constraints
         constraint_layers = OrderedDict()
-        for layer, (variables, Sf_pred, St_pred) in layer_predictions.items():
+        for layer, variables in layer_predictions.items():
+            Sf_pred, St_pred = variables.Sf, variables.St
             if self.mode == 'critic':
                 _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
@@ -575,7 +601,8 @@ class OPFUnrolled(pl.LightningModule):
         layer_predictions, multipliers_predictions = self(batch, multipliers)
 
         constraint_layers = OrderedDict()
-        for layer, (variables, Sf_pred, St_pred) in layer_predictions.items():
+        for layer, variables in layer_predictions.items():
+            Sf_pred, St_pred = variables.Sf, variables.St
             if self.mode == 'critic':
                 _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True
@@ -651,7 +678,8 @@ class OPFUnrolled(pl.LightningModule):
         layer_predictions, multipliers_predictions = self(batch, multipliers)
 
         constraint_layers = OrderedDict()
-        for layer, (variables, Sf_pred, St_pred) in layer_predictions.items():
+        for layer, variables in layer_predictions.items():
+            Sf_pred, St_pred = variables.Sf, variables.St
             if self.mode == 'critic':
                 _, constraints, cost = self._step_helper(
                     variables, batch.powerflow_parameters, multipliers, output_tensors=True

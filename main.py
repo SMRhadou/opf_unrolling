@@ -407,5 +407,4 @@ def objective(trial: optuna.trial.Trial, default_params: dict):
 
 
 if __name__ == "__main__":
-
     main()
