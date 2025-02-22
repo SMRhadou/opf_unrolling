@@ -120,7 +120,7 @@ class OPFUnrolled(pl.LightningModule):
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group("OPFUnrolling")
         group.add_argument("--constraint_eps", type=float, default=0.1)
-        group.add_argument("--exploration_rate", type=float, default=0.4)
+        group.add_argument("--exploration_rate", type=float, default=0.6)
         group.add_argument("--lr_critic", type=float, default=2.96e-4)
         group.add_argument("--lr_actor", type=float, default=1e-5)
         group.add_argument("--weight_decay", type=float, default=0.0001)
@@ -132,10 +132,10 @@ class OPFUnrolled(pl.LightningModule):
         # group.add_argument("--enforce_constraints", action="store_true", default=True)
         group.add_argument("--detailed_metrics", action="store_true", default=False)
         group.add_argument("--cost_weight", type=float, default=1.0)
-        group.add_argument("--augmented_weight", type=float, default=0.9)
+        group.add_argument("--augmented_weight", type=float, default=0.5)
         group.add_argument("--supervised_weight", type=float, default=0.0)
         group.add_argument("--powerflow_weight", type=float, default=0.0)
-        group.add_argument("--noise_std", type=float, default=0.1)
+        group.add_argument("--noise_std", type=float, default=0.5)
         group.add_argument("--warmup", type=int, default=0)
         group.add_argument("--supervised_warmup", type=int, default=0)
         group.add_argument("--no_common", dest="common", action="store_false", default=False)
@@ -153,8 +153,8 @@ class OPFUnrolled(pl.LightningModule):
                     ("equality/bus_reactive_power", torch.Size([n_bus])),
                     ("equality/bus_reference", torch.Size([n_bus])),
                     ("inequality/voltage_magnitude", torch.Size([n_bus, 2])),
-                    ("inequality/active_power", torch.Size([n_gen, 2])),
-                    ("inequality/reactive_power", torch.Size([n_gen, 2])),
+                    ("inequality/active_power", torch.Size([n_bus, 2])),
+                    ("inequality/reactive_power", torch.Size([n_bus, 2])),
                     ("inequality/forward_rate", torch.Size([n_branch, 2])),
                     ("inequality/backward_rate", torch.Size([n_branch, 2])),
                     ("inequality/voltage_angle_difference", torch.Size([n_branch, 2])),
@@ -300,7 +300,7 @@ class OPFUnrolled(pl.LightningModule):
         for type, m in multipliers.items():
             for layer, value in m.items():
                 if type == 'equality/bus_active_power' and self.current_epoch % 10 == 0:
-                    ax1[(int(layer)-1)//num_cols, (int(layer)-1)%num_cols].hist(torch.stack(value).cpu().numpy(), bins=n_bins, label=layer)
+                    ax1[(int(layer)-1)//num_cols, (int(layer)-1)%num_cols].hist(torch.stack(value).reshape(-1,1).cpu().numpy(), bins=n_bins, label=layer)
                 elif type == 'inequality/active_power' and self.current_epoch % 10 == 0:
                     ax2[(int(layer)-1)//num_cols, (int(layer)-1)%num_cols].hist(torch.stack(value).reshape(-1,1).cpu().numpy(), bins=n_bins, label=layer)
         fig1.savefig(f"./figs/bus_active_power_multipliers_histogram @ {self.current_epoch}.pdf")
@@ -333,7 +333,8 @@ class OPFUnrolled(pl.LightningModule):
                     # reshape data to size (batch_size, n_nodes_of_type, n_features)
                     load = data["bus"].x[:, :2].view(n_batch, powerflow_parameters.n_bus, 2)
                     bus = y_dict["bus"].view(n_batch, powerflow_parameters.n_bus, 4)[..., 2:]
-                    gen = y_dict["gen"].view(n_batch, powerflow_parameters.n_gen, 4)[..., :2]
+                    gen = y_dict["bus"].view(n_batch, powerflow_parameters.n_bus, 4)[:, powerflow_parameters.gen_bus_ids, :2]
+                    # gen = y_dict["gen"].view(n_batch, powerflow_parameters.n_gen, 4)[..., :2]
                     # branch = y_dict["branch"].view(n_batch, powerflow_parameters.n_branch, 4)
                     V = self.parse_bus(bus)
                     Sg = self.parse_gen(gen)
@@ -387,8 +388,8 @@ class OPFUnrolled(pl.LightningModule):
         self,
         batch: PowerflowBatch,
         variables: pf.PowerflowVariables,
-        Sf_pred: torch.Tensor,
-        St_pred: torch.Tensor,
+        Sf_pred: torch.Tensor=None,
+        St_pred: torch.Tensor=None,
     ):
         """
         Calculate the MSE between the predicted and target bus voltage and generator power.
@@ -677,73 +678,32 @@ class OPFUnrolled(pl.LightningModule):
         multipliers = self.get_rand_multipliers(batch.index)
         layer_predictions, multipliers_predictions = self(batch, multipliers)
 
-        constraint_layers = OrderedDict()
+        constraint_layers = []
+        cost_layers = []
+        supervised_loss_layers = []
+        opf_lagrangian_layers = []
         for layer, variables in layer_predictions.items():
-            Sf_pred, St_pred = variables.Sf, variables.St
-            if self.mode == 'critic':
-                _, constraints, cost = self._step_helper(
-                    variables, batch.powerflow_parameters, multipliers, output_tensors=True
-                )   # Evaluate the OPF objective and Constraints
-                constraint_loss = self.constraint_loss(constraints)
-
-                powerflow_loss = self.powerflow_loss(batch, variables, Sf_pred, St_pred)
-                opf_lagrangian = (
-                    self.cost_weight * cost / batch.powerflow_parameters.n_gen
-                    + constraint_loss
-                    + self.powerflow_weight * powerflow_loss
-                )
-                self.log(f"{self.mode}/test/{layer}/opf_lagrangian", opf_lagrangian.mean(),
-                        batch_size=batch.data.num_graphs, sync_dist=True)
-                constraint_layers[layer] = opf_lagrangian
-            elif self.mode == 'actor':
-                _, constraints, cost = self._step_helper(
-                    variables, batch.powerflow_parameters, output_tensors=False
-                )   # Evaluate the OPF objective and Constraints
-                opf_violation_loss = self.constraint_loss(constraints)
-                self.log(f"{self.mode}/test/{layer}/opf_violation_loss", opf_violation_loss.mean(),
-                        batch_size=batch.data.num_graphs, sync_dist=True)
-                constraint_layers[layer] = opf_violation_loss
-        val_constraints_loss = self.training_constraints(constraint_layers, train=False)
-        
-        # Training objective (+/- lagrangian at the last layer)
-        if self.mode == 'actor':
-            multipliers = multipliers_predictions[layer]
-            opf_constraints, cost = self.constraints(variables, batch.powerflow_parameters, multipliers)
-            supervised_loss = self.supervised_loss(batch, variables, Sf_pred, St_pred)
             _, constraints, cost = self._step_helper(
-                    variables, batch.powerflow_parameters, multipliers, output_tensors=True
-                )   # Evaluate the OPF objective and Constraints
-            constraint_loss = self.constraint_loss(constraints)
-            opf_lagrangian = (
-                self.cost_weight * cost / batch.powerflow_parameters.n_gen
-                + constraint_loss
-            )
-            loss = - opf_lagrangian.mean()
-            self.log(f"{self.mode}/test/loss/opf_cost", 
-                        cost.mean(),
-                        batch_size=batch.data.num_graphs, sync_dist=True)
-        elif self.mode == 'critic':
-            loss = opf_lagrangian.mean()
-            
-        loss = loss + val_constraints_loss
-        self.log(f"{self.mode}/test/loss", loss,
-            batch_size=batch_size, sync_dist=True)
-        self.log(f"{self.mode}/test/constraints", val_constraints_loss,
-            batch_size=batch_size, sync_dist=True)
+                variables, batch.powerflow_parameters, output_tensors=False
+            )   # Evaluate the OPF objective and Constraints
+            cost_layers.append(cost.item())
+            opf_violation_loss = self.constraint_loss(constraints)
+            constraint_layers.append(opf_violation_loss.mean().item()) 
+
+            supervised_loss_layers.append(self.supervised_loss(batch, variables).item())       
     
-        if self.mode == 'actor':
-            self.log(f"{self.mode}/test/loss/supervised", supervised_loss,
-                batch_size=batch.data.num_graphs, sync_dist=True)
-            for name, value in opf_constraints.items():
-                self.log(f"{self.mode}/test/constraints/max/{name}", value['violation_max'][0].mean(),
-                    batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/test/constraints/total/{name}", value['violation_mean'].mean(),
-                    batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/test/constraints/mean/{name}", (value['violation_mean']/value['nConstraints']).mean(),
-                    batch_size=batch.data.num_graphs, sync_dist=True)
-                self.log(f"{self.mode}/test/constraints/rate/{name}", value['rate'],
-                    batch_size=batch.data.num_graphs, sync_dist=True)
-        return loss
+            if int(layer) > 0:
+                multipliers = multipliers_predictions[layer]
+                _, constraints, cost = self._step_helper(
+                        variables, batch.powerflow_parameters, multipliers, output_tensors=True
+                    )   # Evaluate the OPF objective and Constraints
+                constraint_loss_augmented = self.constraint_loss(constraints)
+                opf_lagrangian_layers.append(
+                    (self.cost_weight * cost / batch.powerflow_parameters.n_gen
+                    + constraint_loss_augmented).mean().item()
+                )
+
+        return constraint_layers[-1]
                 
                 
         # # TODO
@@ -910,16 +870,28 @@ class OPFUnrolled(pl.LightningModule):
                     self.augmented_weight if constraint.augmented else 0.0,
                 )
             elif isinstance(constraint, pf.InequalityConstraint):
-                values[name], loss[name] = inequality(
-                    constraint.variable,
-                    constraint.min,
-                    constraint.max,
-                    multipliers[name][..., 0] if multipliers is not None else None,
-                    multipliers[name][..., 1] if multipliers is not None else None,
-                    self.eps,
-                    constraint.isAngle,
-                    self.augmented_weight if constraint.augmented else 0.0,
-                )
+                if name == 'inequality/active_power' or name == 'inequality/reactive_power':
+                    values[name], loss[name] = inequality(
+                        constraint.variable,
+                        constraint.min,
+                        constraint.max,
+                        multipliers[name][:, powerflow_parameters.gen_bus_ids, 0] if multipliers is not None else None,
+                        multipliers[name][:, powerflow_parameters.gen_bus_ids, 1] if multipliers is not None else None,
+                        self.eps,
+                        constraint.isAngle,
+                        self.augmented_weight if constraint.augmented else 0.0,
+                    )
+                else:
+                    values[name], loss[name] = inequality(
+                        constraint.variable,
+                        constraint.min,
+                        constraint.max,
+                        multipliers[name][..., 0] if multipliers is not None else None,
+                        multipliers[name][..., 1] if multipliers is not None else None,
+                        self.eps,
+                        constraint.isAngle,
+                        self.augmented_weight if constraint.augmented else 0.0,
+                    )
         return values, loss
 
     def training_constraints(self, opf_lagrangian_layers, train=True):

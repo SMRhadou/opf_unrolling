@@ -695,8 +695,7 @@ class critic_heteroSage(HeteroSage):
                 )
             )
     
-    @staticmethod
-    def multiplier_allocation(type):
+    def multiplier_allocation(self, type):
         if type == 'equality/bus_active_power':
             return 'bus', 0, 1
         elif type == 'equality/bus_reactive_power':
@@ -706,9 +705,9 @@ class critic_heteroSage(HeteroSage):
         elif type == 'inequality/voltage_magnitude':
             return 'bus',  3,  5
         elif type == 'inequality/active_power':
-            return 'gen',  5,  7
+            return 'bus',  5,  7
         elif type == 'inequality/reactive_power':
-            return 'gen',  7,  9
+            return 'bus',  7,  9
         elif type == 'inequality/forward_rate':
             return 'branch',  9,  11
         elif type == 'inequality/backward_rate':
@@ -746,7 +745,7 @@ class critic_heteroSage(HeteroSage):
                     m = m.reshape(-1, 2)
                 node_type, start, end = self.multiplier_allocation(type)
                 multiplier_location[type] = node_type, start, end
-                x_dict[node_type][:, start:end] = m
+                x_dict[node_type][:, self.x_channels+start:self.x_channels+end] = m
         else:
             x_dict = {
                 node_type: torch.cat([x_dict[node_type][:,:self.x_channels], m], dim=1)
@@ -811,7 +810,7 @@ class actor_heteroSage(HeteroSage):
         #     help="Number of hidden features on each layer.",
         # )
         group.add_argument(
-            "--n_layers_actor", type=int, default=8, help="Number of GNN layers."
+            "--n_layers_actor", type=int, default=10, help="Number of GNN layers."
         )
         group.add_argument(
             "--n_sub_layer_actor", type=int, default=3, help="Number of sub layers in each actor layer."
